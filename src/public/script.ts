@@ -2,7 +2,7 @@ export const EXPRESSIONS = ['neutral', 'happy', 'sad', 'angry', 'surprised'] as 
 
 export type Expression = typeof EXPRESSIONS[number];
 export interface ScriptSegment { expression: Expression; text: string }
-export interface CaptionCue { text: string; weight: number }
+export interface CaptionCue { text: string; spoken: string; weight: number }
 export interface ActiveCaption { text: string; progress: number; index: number }
 export interface EnglishRubyCandidate { word: string; reading: string; count: number }
 
@@ -49,6 +49,24 @@ export function applyEnglishRuby(source: unknown, readings: Readonly<Record<stri
       if (token.startsWith('｜') || token.startsWith('[')) return token;
       const reading = readings[token]?.trim();
       return reading ? `｜${token}《${reading}》` : token;
+    }
+  );
+}
+
+export function applyJapaneseRubyCorrections(source: unknown, readings: Readonly<Record<string, string>>): string {
+  const entries = Object.entries(readings)
+    .map(([word, reading]) => [word.trim(), reading.trim()] as const)
+    .filter(([word, reading]) => word && reading && !/[｜《》\[\]\r\n]/u.test(word))
+    .sort((left, right) => [...right[0]].length - [...left[0]].length);
+  if (!entries.length) return String(source ?? '');
+  const escaped = entries.map(([word]) => word.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'));
+  const replacement = new RegExp(escaped.join('|'), 'gu');
+  const readingByWord = new Map(entries);
+  return String(source ?? '').replace(
+    /｜[^《\n]+《[^》\n]+》|[\p{Script=Han}々〆ヵヶ]+《[^》\n]+》|\[(?:neutral|happy|sad|angry|surprised)\]|[^｜\[\n]+|./giu,
+    token => {
+      if (token.startsWith('｜') || token.startsWith('[') || /《[^》\n]+》$/u.test(token)) return token;
+      return token.replace(replacement, word => `｜${word}《${readingByWord.get(word)!}》`);
     }
   );
 }
@@ -116,7 +134,8 @@ export function captionCues(source: unknown): CaptionCue[] {
     spoken = '';
     visibleChars = 0;
     if (text) {
-      cues.push({ text, weight: Math.max(1, [...plainText(spokenText)].length + captionPauseWeight(spokenText)) });
+      const spokenValue = plainText(spokenText);
+      cues.push({ text, spoken: spokenValue, weight: Math.max(1, [...spokenValue].length + captionPauseWeight(spokenText)) });
     } else {
       const blankPause = captionPauseWeight(spokenText);
       const previous = cues.at(-1);

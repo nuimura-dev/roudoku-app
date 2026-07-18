@@ -1,4 +1,4 @@
-import { activeCaption, applyEnglishRuby, captionCues, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, plainText, type ActiveCaption, type CaptionCue, type Expression } from './script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, plainText, type ActiveCaption, type CaptionCue, type Expression } from './script.js';
 import { matchTimelineAnchors } from './alignment.js';
 
 type Viseme = 'closed' | 'a' | 'i' | 'u' | 'e' | 'o';
@@ -52,6 +52,8 @@ interface AppState {
   audioDuration: number;
   audioBlob: Blob | null;
   audioName: string;
+  audioScriptSource: string | null;
+  audioCaptionTimes: number[] | null;
   bgmBuffer: AudioBuffer | null;
   bgmName: string;
   ambientBuffer: AudioBuffer | null;
@@ -100,6 +102,10 @@ const elements = {
   englishRubySummary: required<HTMLElement>('#englishRubySummary'),
   englishRubyList: required<HTMLElement>('#englishRubyList'),
   applyEnglishRuby: required<HTMLButtonElement>('#applyEnglishRuby'),
+  pronunciationCorrections: required<HTMLTextAreaElement>('#pronunciationCorrections'),
+  applyPronunciationCorrections: required<HTMLButtonElement>('#applyPronunciationCorrections'),
+  repairPronunciationAudio: required<HTMLButtonElement>('#repairPronunciationAudio'),
+  pronunciationRepairStatus: required<HTMLElement>('#pronunciationRepairStatus'),
   expressionPill: required<HTMLElement>('#expressionPill'),
   timeline: required<HTMLElement>('#timeline'),
   timelineFill: required<HTMLElement>('#timelineFill'),
@@ -206,7 +212,7 @@ const state: AppState = {
     character: defaultLayerOffset('character'),
     foreground: defaultLayerOffset('foreground')
   },
-  activeLayer: 'character', audioBuffer: null, audioElement: null, audioMediaNode: null, audioUrl: null, audioDuration: 0, audioBlob: null, audioName: '', bgmBuffer: null, bgmName: '', ambientBuffer: null, ambientName: '', playing: false, exporting: false,
+  activeLayer: 'character', audioBuffer: null, audioElement: null, audioMediaNode: null, audioUrl: null, audioDuration: 0, audioBlob: null, audioName: '', audioScriptSource: null, audioCaptionTimes: null, bgmBuffer: null, bgmName: '', ambientBuffer: null, ambientName: '', playing: false, exporting: false,
   progress: 0, overallProgress: 0, playbackElapsed: 0, playbackPhase: 'idle', mouth: 0, currentExpression: 'neutral', previousExpression: 'neutral',
   expressionTransitionStartedAt: Number.NEGATIVE_INFINITY, currentViseme: 'closed', session: null, captionCues: [], captionTimes: null
 };
@@ -284,7 +290,7 @@ function formatTime(seconds: number): string {
 function metadataNarration(): string {
   const title = elements.workTitle.value.trim();
   const author = elements.workAuthor.value.trim();
-  return [title ? `作品名、「${title}」。` : '', author ? `著者、${author}。` : ''].filter(Boolean).join('');
+  return [title ? `作品名、${title}。` : '', author ? `著者、${author}。` : ''].filter(Boolean).join('');
 }
 
 function playbackScriptSource(): string {
@@ -1322,11 +1328,13 @@ function clearNarrationAudio(): void {
   state.audioDuration = 0;
   state.audioBlob = null;
   state.captionTimes = null;
+  state.audioScriptSource = null;
+  state.audioCaptionTimes = null;
   elements.saveAudio.disabled = true;
   elements.saveAudioFromScript.disabled = true;
 }
 
-async function loadLongAudio(blob: Blob, name: string): Promise<void> {
+async function loadLongAudio(blob: Blob, name: string, scriptSource: string): Promise<void> {
   const url = URL.createObjectURL(blob);
   const audio = new Audio();
   audio.preload = 'metadata';
@@ -1343,6 +1351,7 @@ async function loadLongAudio(blob: Blob, name: string): Promise<void> {
     state.audioDuration = audio.duration;
     state.audioBlob = blob;
     state.audioName = name;
+    state.audioScriptSource = scriptSource;
     elements.saveAudio.disabled = false;
     elements.saveAudioFromScript.disabled = false;
     elements.audioName.textContent = `${name} · ${formatTime(audio.duration)} · 長編省メモリ`;
@@ -1361,6 +1370,7 @@ function scheduleCaptionAlignment(buffer: AudioBuffer): void {
   void alignCaptionTimes(targetBuffer, targetCues).then(times => {
     if (state.audioBuffer !== targetBuffer || state.captionCues !== targetCues) return;
     state.captionTimes = times;
+    if (state.audioScriptSource === playbackScriptSource()) state.audioCaptionTimes = times;
     draw();
     notify('字幕タイミングの補正が完了しました。', true);
   }).catch(error => {
@@ -1375,6 +1385,7 @@ function scheduleLongCaptionAlignment(blob: Blob): void {
   void alignLongWavCaptionTimes(targetBlob, targetCues).then(times => {
     if (state.audioBlob !== targetBlob || state.captionCues !== targetCues) return;
     state.captionTimes = times;
+    if (state.audioScriptSource === playbackScriptSource()) state.audioCaptionTimes = times;
     draw();
     notify(times
       ? '長編WAVの無音位置に合わせて字幕タイミングを補正しました。'
@@ -1385,16 +1396,17 @@ function scheduleLongCaptionAlignment(blob: Blob): void {
   });
 }
 
-async function loadAudio(blob: Blob, name: string): Promise<void> {
+async function loadAudio(blob: Blob, name: string, scriptSource = playbackScriptSource()): Promise<void> {
   const ac = await ensureAudioContext();
   try {
     if (blob.size > 48 * 1024 * 1024) {
-      await loadLongAudio(blob, name);
+      await loadLongAudio(blob, name, scriptSource);
       return;
     }
     const buffer = await ac.decodeAudioData(await blob.arrayBuffer());
     clearNarrationAudio();
     state.audioBuffer = buffer; state.audioBlob = blob; state.audioName = name;
+    state.audioScriptSource = scriptSource;
     elements.saveAudio.disabled = false;
     elements.saveAudioFromScript.disabled = false;
     elements.audioName.textContent = `${name} · ${formatTime(buffer.duration)}`;
@@ -1753,7 +1765,7 @@ function cancelExport(): void {
 
 const projectFieldIds = [
   'workTitle', 'workAuthor', 'workPublication', 'openingText', 'openingDuration', 'endingText', 'endingDuration',
-  'aozoraUrl', 'scriptInput', 'ttsEngine', 'irodoriVoice', 'irodoriCaption', 'irodoriQuality', 'irodoriAttackFade',
+  'aozoraUrl', 'scriptInput', 'pronunciationCorrections', 'ttsEngine', 'irodoriVoice', 'irodoriCaption', 'irodoriQuality', 'irodoriAttackFade',
   'voiceSpeed', 'speakerId', 'showCaptions', 'captionEffect', 'captionSize', 'captionX', 'captionY',
   'characterScale', 'backgroundScale', 'foregroundScale', 'characterMotion', 'hairMotion', 'legMotion',
   'mouthX', 'mouthY', 'mouthSize', 'useMouthSprites', 'bgmPreset', 'bgmVolume', 'bgmLoop',
@@ -1863,6 +1875,10 @@ async function loadProject(file: File): Promise<void> {
   document.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(input => input.dispatchEvent(new Event('input')));
   updateTtsEngine();
   updateScript();
+  if (preservedAudio) {
+    state.audioScriptSource = playbackScriptSource();
+    state.audioCaptionTimes = null;
+  }
   if (state.audioBuffer) {
     notify('プロジェクトの台本に合わせて字幕タイミングを再補正しています。', true);
     scheduleCaptionAlignment(state.audioBuffer);
@@ -1914,6 +1930,31 @@ elements.applyEnglishRuby.addEventListener('click', () => {
   elements.script.value = converted;
   updateScript();
   notify('英単語の読みを台本へ反映しました。', true);
+});
+function pronunciationReadings(): Record<string, string> {
+  const readings: Record<string, string> = {};
+  for (const [index, line] of elements.pronunciationCorrections.value.split(/\r?\n/u).entries()) {
+    const separator = line.indexOf('=');
+    if (!line.trim()) continue;
+    if (separator < 1 || !line.slice(separator + 1).trim()) throw new Error(`${index + 1}行目は「漢字=よみ」で入力してください`);
+    readings[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
+  }
+  return readings;
+}
+
+elements.applyPronunciationCorrections.addEventListener('click', () => {
+  try {
+    const readings = pronunciationReadings();
+    if (!Object.keys(readings).length) { notify('修正する読みを入力してください。'); return; }
+    const converted = applyJapaneseRubyCorrections(elements.script.value, readings);
+    if (converted === elements.script.value) { notify('新しく反映できる漢字がありません。'); return; }
+    elements.script.value = converted;
+    updateScript();
+    elements.pronunciationRepairStatus.textContent = `${Object.keys(readings).length}語のルビを台本へ反映しました。音声を直す場合は右のボタンを押してください。`;
+    notify('漢字の読みを台本へ一括反映しました。', true);
+  } catch (error) {
+    notify(errorMessage(error));
+  }
 });
 elements.workTitle.addEventListener('input', updateScript);
 elements.workAuthor.addEventListener('input', updateScript);
@@ -2097,6 +2138,7 @@ function setVoiceGenerationState(generating: boolean): void {
   elements.generateVoice.disabled = generating;
   elements.generateVoiceFromScript.disabled = generating;
   elements.generateVoiceAndExport.disabled = generating || combinedWorkflowRunning;
+  elements.repairPronunciationAudio.disabled = generating;
   elements.generateVoice.textContent = generating ? '音声を生成中…' : '台本から音声を生成';
   elements.generateVoiceFromScript.textContent = generating ? '音声を生成中…' : '音声を生成';
   elements.cancelVoice.hidden = !generating;
@@ -2119,36 +2161,49 @@ function saveNarrationAudio(): void {
   notify(`音声を「${filename}」として保存しました。`, true);
 }
 
+function speechRequest(text: string): { endpoint: string; body: Record<string, string | number>; name: string } {
+  const irodori = elements.ttsEngine.value === 'irodori';
+  return irodori
+    ? {
+        endpoint: '/api/irodori/speech',
+        body: {
+          text,
+          voice: elements.irodoriVoice.value,
+          speed: Number(elements.voiceSpeed.value),
+          caption: elements.irodoriCaption.value,
+          quality: elements.irodoriQuality.value,
+          attackFadeMs: Number(elements.irodoriAttackFade.value)
+        },
+        name: 'Irodori-TTS音声.wav'
+      }
+    : {
+        endpoint: '/api/tts',
+        body: { text, speaker: Number(elements.speakerId.value), speedScale: Number(elements.voiceSpeed.value) },
+        name: 'VOICEVOX音声.wav'
+      };
+}
+
+async function fetchSpeech(text: string, signal: AbortSignal): Promise<{ blob: Blob; name: string }> {
+  const request = speechRequest(text);
+  const response = await fetch(request.endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request.body), signal
+  });
+  if (!response.ok) {
+    const data = await response.json() as { error?: string; detail?: string };
+    throw new Error(data.detail ?? data.error ?? '音声生成に失敗しました。');
+  }
+  return { blob: await response.blob(), name: request.name };
+}
+
 async function generateScriptVoice(): Promise<boolean> {
   if (voiceGenerationController) return false;
   const controller = new AbortController();
   voiceGenerationController = controller;
   setVoiceGenerationState(true);
   try {
-    const irodori = elements.ttsEngine.value === 'irodori';
-    const endpoint = irodori ? '/api/irodori/speech' : '/api/tts';
-    const body = irodori
-      ? {
-          text: plainText(playbackScriptSource()),
-          voice: elements.irodoriVoice.value,
-          speed: Number(elements.voiceSpeed.value),
-          caption: elements.irodoriCaption.value,
-          quality: elements.irodoriQuality.value,
-          attackFadeMs: Number(elements.irodoriAttackFade.value)
-        }
-      : {
-          text: plainText(playbackScriptSource()),
-          speaker: Number(elements.speakerId.value),
-          speedScale: Number(elements.voiceSpeed.value)
-        };
-    const response = await fetch(endpoint, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal
-    });
-    if (!response.ok) {
-      const data = await response.json() as { error?: string; detail?: string };
-      throw new Error(data.detail ?? data.error ?? '音声生成に失敗しました。');
-    }
-    await loadAudio(await response.blob(), irodori ? 'Irodori-TTS音声.wav' : 'VOICEVOX音声.wav');
+    const scriptSource = playbackScriptSource();
+    const generated = await fetchSpeech(plainText(scriptSource), controller.signal);
+    await loadAudio(generated.blob, generated.name, scriptSource);
     return true;
   } catch (error) {
     if (!controller.signal.aborted) notify(errorMessage(error));
@@ -2156,6 +2211,108 @@ async function generateScriptVoice(): Promise<boolean> {
   } finally {
     if (voiceGenerationController === controller) voiceGenerationController = null;
     setVoiceGenerationState(false);
+  }
+}
+
+interface CaptionRepairRange { from: number; to: number }
+
+function changedCaptionRanges(before: readonly CaptionCue[], after: readonly CaptionCue[]): CaptionRepairRange[] {
+  if (before.length !== after.length || before.some((cue, index) => cue.text !== after[index]?.text)) {
+    throw new Error('読み以外の台本文字も変わっています。部分修正には表示文章が同じ音声を使用してください。');
+  }
+  const changed = before.flatMap((cue, index) => cue.spoken === after[index]!.spoken ? [] : [index]);
+  const sentenceEnd = (text: string): boolean => /[。．.!！?？…][」』）)】］\]”’]*\s*$/u.test(text);
+  const ranges: CaptionRepairRange[] = [];
+  for (const index of changed) {
+    let from = index;
+    let to = index;
+    while (from > 0 && !sentenceEnd(before[from - 1]!.text)) from -= 1;
+    while (to < before.length - 1 && !sentenceEnd(before[to]!.text)) to += 1;
+    const previous = ranges.at(-1);
+    if (previous && from <= previous.to + 1) previous.to = Math.max(previous.to, to);
+    else ranges.push({ from, to });
+  }
+  return ranges;
+}
+
+function base64Url(value: string): string {
+  return btoa(value).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+async function repairPronunciationAudio(): Promise<void> {
+  if (voiceGenerationController) return;
+  if (!state.audioBlob || !state.audioScriptSource) {
+    notify('先に元の朗読音声を生成または読み込んでください。');
+    return;
+  }
+  if (!state.audioCaptionTimes) {
+    notify('音声の字幕タイミングを解析中です。完了後にもう一度お試しください。');
+    return;
+  }
+  const currentSource = playbackScriptSource();
+  const beforeCues = captionCues(state.audioScriptSource);
+  const afterCues = captionCues(currentSource);
+  let ranges: CaptionRepairRange[];
+  try {
+    ranges = changedCaptionRanges(beforeCues, afterCues);
+  } catch (error) {
+    notify(errorMessage(error));
+    return;
+  }
+  if (!ranges.length) {
+    notify('元音声から読みが変更された文はありません。先にルビを反映してください。');
+    return;
+  }
+  if (ranges.length > 50) {
+    notify('修正区間が50件を超えています。いくつかに分けて修正してください。');
+    return;
+  }
+  const times = state.audioCaptionTimes;
+  if (times.length !== beforeCues.length + 1) {
+    notify('元音声の文境界が台本と一致しません。字幕タイミングの補正完了を待ってください。');
+    return;
+  }
+
+  const controller = new AbortController();
+  voiceGenerationController = controller;
+  setVoiceGenerationState(true);
+  elements.repairPronunciationAudio.textContent = `修正文を生成中 0/${ranges.length}`;
+  elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の修正文を生成します。`;
+  try {
+    const replacements: Blob[] = [];
+    for (const [index, range] of ranges.entries()) {
+      elements.repairPronunciationAudio.textContent = `修正文を生成中 ${index + 1}/${ranges.length}`;
+      const text = afterCues.slice(range.from, range.to + 1).map(cue => cue.spoken).join('');
+      replacements.push((await fetchSpeech(text, controller.signal)).blob);
+    }
+    elements.repairPronunciationAudio.textContent = '元音声へ差し替え中…';
+    const manifest = ranges.map((range, index) => ({
+      start: times[range.from]!,
+      end: times[range.to + 1]!,
+      size: replacements[index]!.size
+    }));
+    const response = await fetch('/api/audio/repair', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        'x-roudoku-repairs': base64Url(JSON.stringify(manifest))
+      },
+      body: new Blob([...replacements, state.audioBlob]),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const data = await response.json() as { error?: string; detail?: string };
+      throw new Error(data.detail ?? data.error ?? '修正文を元音声へ差し替えられませんでした。');
+    }
+    await loadAudio(await response.blob(), `${state.audioName.replace(/\.wav$/iu, '')}-読み修正版.wav`, currentSource);
+    elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の音声を修正しました。必要なら音声を保存してください。`;
+    notify(`${ranges.length}区間の読みを修正しました。`, true);
+  } catch (error) {
+    if (!controller.signal.aborted) notify(errorMessage(error));
+  } finally {
+    if (voiceGenerationController === controller) voiceGenerationController = null;
+    setVoiceGenerationState(false);
+    elements.repairPronunciationAudio.textContent = '変更文だけ音声を修正';
   }
 }
 
@@ -2187,6 +2344,7 @@ function cancelVoiceGeneration(): void {
 elements.generateVoice.addEventListener('click', () => { void generateScriptVoice(); });
 elements.generateVoiceFromScript.addEventListener('click', () => { void generateScriptVoice(); });
 elements.generateVoiceAndExport.addEventListener('click', () => { void generateVoiceAndExport(); });
+elements.repairPronunciationAudio.addEventListener('click', () => { void repairPronunciationAudio(); });
 elements.saveAudio.addEventListener('click', saveNarrationAudio);
 elements.saveAudioFromScript.addEventListener('click', saveNarrationAudio);
 elements.cancelVoice.addEventListener('click', cancelVoiceGeneration);

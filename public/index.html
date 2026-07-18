@@ -74,6 +74,15 @@
           <div class="english-ruby-list" id="englishRubyList"></div>
           <button id="applyEnglishRuby" type="button">台本へルビを反映</button>
         </div>
+        <div class="pronunciation-repair-panel">
+          <div><strong>漢字の読み修正</strong><small>複数指定可・同じ語は全箇所へ反映</small></div>
+          <textarea id="pronunciationCorrections" rows="3" placeholder="1行に1件、漢字=よみ&#10;例：狐狸=こり&#10;棲む=すむ"></textarea>
+          <div class="pronunciation-repair-actions">
+            <button id="applyPronunciationCorrections" type="button">台本へルビを一括反映</button>
+            <button id="repairPronunciationAudio" class="secondary-action" type="button">変更文だけ音声を修正</button>
+          </div>
+          <small id="pronunciationRepairStatus">文脈で読みが異なる箇所は、台本へ直接「｜漢字《よみ》」と指定できます。</small>
+        </div>
         <div class="script-voice-actions">
           <div><strong>この台本から音声を生成</strong><small>音声タブの声・速度・品質設定を使用します</small></div>
           <div class="generation-actions"><button id="generateVoiceFromScript" type="button">音声を生成</button><button class="secondary-action" id="generateVoiceAndExport" type="button">音声生成 → MP4</button><button class="save-audio-action" id="saveAudioFromScript" type="button" disabled>音声を保存</button><button class="cancel-action" id="cancelVoiceFromScript" type="button" hidden>中止</button></div>

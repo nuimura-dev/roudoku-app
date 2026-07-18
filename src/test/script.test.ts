@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeCaption, applyEnglishRuby, captionCues, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, plainText } from '../public/script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, plainText } from '../public/script.js';
 
 test('表情タグ付き台本を解析する', () => {
   assert.deepEqual(parseScript('こんにちは。[happy]うれしい！[sad]でも少し残念。'), [
@@ -32,6 +32,7 @@ test('英語の固有名詞はルビで自然な読みを指定できる', () =>
   assert.equal(displayText('｜London《ロンドン》へ行く。'), 'Londonへ行く。');
   const cue = captionCues('｜London《ロンドン》へ行く。')[0]!;
   assert.equal(cue.text, 'Londonへ行く。');
+  assert.equal(cue.spoken, 'ロンドンへ行く。');
   assert.equal(cue.weight, [...'ロンドンへ行く。'].length + 11.4);
 });
 
@@ -44,6 +45,14 @@ test('台本の英単語を集計し、編集した読みを一括反映する',
   assert.equal(
     applyEnglishRuby(source, { London: 'ロンドン', MP4: 'エムピーフォー' }),
     '[happy]｜London《ロンドン》と｜London《ロンドン》、｜Paris《パリ》、｜MP4《エムピーフォー》。'
+  );
+});
+
+test('複数の漢字へ読みを一括反映し、既存ルビは維持する', () => {
+  const source = '顧みる者はいない。顧みる。｜顧みる《別のよみ》。狐狸が棲む。';
+  assert.equal(
+    applyJapaneseRubyCorrections(source, { 顧みる: 'かえりみる', 狐狸: 'こり', 棲む: 'すむ' }),
+    '｜顧みる《かえりみる》者はいない。｜顧みる《かえりみる》。｜顧みる《別のよみ》。｜狐狸《こり》が｜棲む《すむ》。'
   );
 });
 

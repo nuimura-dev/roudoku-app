@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdtemp, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative as relativePath, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -69,6 +69,7 @@ function run(command: string, args: string[], signal?: AbortSignal): Promise<voi
 interface VoicevoxRequest { text?: string; speaker?: number; speedScale?: number }
 interface VoicevoxQuery { speedScale: number; [key: string]: unknown }
 interface AozoraRequest { url?: string }
+interface AudioRepairRange { start: number; end: number; size: number }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -315,6 +316,89 @@ async function convert(req: IncomingMessage, res: ServerResponse): Promise<void>
   }
 }
 
+function audioRepairRanges(req: IncomingMessage): AudioRepairRange[] {
+  const encoded = req.headers['x-roudoku-repairs'];
+  if (typeof encoded !== 'string' || encoded.length > 16_384) throw new Error('音声修正情報がありません');
+  const value = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as unknown;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 50) throw new Error('音声修正は1〜50区間で指定してください');
+  let previousEnd = 0;
+  return value.map((item, index) => {
+    const range = item as Partial<AudioRepairRange>;
+    const start = Number(range.start);
+    const end = Number(range.end);
+    const size = Number(range.size);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < previousEnd || end <= start || end - start > 300) {
+      throw new Error(`音声修正区間${index + 1}が不正です`);
+    }
+    if (!Number.isSafeInteger(size) || size < 44 || size > 100 * 1024 * 1024) {
+      throw new Error(`修正音声${index + 1}のサイズが不正です`);
+    }
+    previousEnd = end;
+    return { start, end, size };
+  });
+}
+
+async function repairAudio(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'roudoku-audio-repair-'));
+  const combined = join(dir, 'combined.bin');
+  const original = join(dir, 'original.wav');
+  const output = join(dir, 'repaired.wav');
+  const clientAbort = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) clientAbort.abort(); });
+  try {
+    const ranges = audioRepairRanges(req);
+    await requestToFile(req, combined, maxVideoUpload);
+    const combinedInfo = await stat(combined);
+    const replacementBytes = ranges.reduce((sum, range) => sum + range.size, 0);
+    if (combinedInfo.size <= replacementBytes) throw new Error('元音声データがありません');
+
+    let offset = 0;
+    const replacementPaths: string[] = [];
+    for (const [index, range] of ranges.entries()) {
+      const path = join(dir, `replacement-${index}.wav`);
+      await pipeline(createReadStream(combined, { start: offset, end: offset + range.size - 1 }), createWriteStream(path));
+      replacementPaths.push(path);
+      offset += range.size;
+    }
+    await pipeline(createReadStream(combined, { start: offset }), createWriteStream(original));
+
+    const inputs = ['-i', original];
+    replacementPaths.forEach(path => inputs.push('-i', path));
+    const filters: string[] = [];
+    const pieces: string[] = [];
+    let cursor = 0;
+    let pieceIndex = 0;
+    const addOriginal = (start: number, end?: number): void => {
+      const label = `p${pieceIndex++}`;
+      const endOption = end === undefined ? '' : `:end=${end.toFixed(6)}`;
+      filters.push(`[0:a]atrim=start=${start.toFixed(6)}${endOption},asetpts=PTS-STARTPTS,aformat=sample_rates=48000:sample_fmts=s16:channel_layouts=mono[${label}]`);
+      pieces.push(`[${label}]`);
+    };
+    ranges.forEach((range, index) => {
+      if (range.start > cursor + .001) addOriginal(cursor, range.start);
+      const label = `p${pieceIndex++}`;
+      filters.push(`[${index + 1}:a]asetpts=PTS-STARTPTS,aformat=sample_rates=48000:sample_fmts=s16:channel_layouts=mono[${label}]`);
+      pieces.push(`[${label}]`);
+      cursor = range.end;
+    });
+    addOriginal(cursor);
+    filters.push(`${pieces.join('')}concat=n=${pieces.length}:v=0:a=1[out]`);
+    await run('ffmpeg', [
+      '-y', ...inputs, '-filter_complex', filters.join(';'), '-map', '[out]',
+      '-c:a', 'pcm_s16le', output
+    ], clientAbort.signal);
+    const audio = await stat(output);
+    res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': audio.size });
+    await pipeline(createReadStream(output), res);
+  } catch (error) {
+    if (!clientAbort.signal.aborted && !res.destroyed && !res.headersSent) {
+      json(res, 500, { error: '修正文の音声を差し替えられませんでした', detail: errorMessage(error) });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function staticFile(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const urlPath = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
   const requestedFile = urlPath === '/' ? 'index.html' : decodeURIComponent(urlPath.slice(1));
@@ -343,6 +427,7 @@ createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/api/irodori/voices') return await irodoriVoiceUpload(req, res);
     if (req.method === 'POST' && req.url === '/api/aozora') return await importAozora(req, res);
     if (req.method === 'POST' && req.url === '/api/export') return await convert(req, res);
+    if (req.method === 'POST' && req.url === '/api/audio/repair') return await repairAudio(req, res);
     if (req.method === 'GET' && req.url === '/api/irodori/health') return await irodoriHealth(res);
     if (req.method === 'GET') return await staticFile(req, res);
     json(res, 405, { error: 'Method not allowed' });
