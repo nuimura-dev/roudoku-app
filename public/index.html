@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>朗読娘 — キャラクター動画スタジオ</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="朗読娘 ホーム"><span>朗読</span>娘</a>
+    <div class="topbar-actions">
+      <button id="saveProject" type="button">プロジェクト保存</button>
+      <label class="open-project">プロジェクト読込<input id="openProject" type="file" accept=".json,.roudoku.json,.vtreader.json,application/json"></label>
+      <div class="status"><i></i><span id="statusText">準備中</span></div>
+    </div>
+  </header>
+
+  <main>
+    <section class="stage-panel">
+      <div class="stage-wrap">
+        <canvas id="stage" width="1280" height="720" aria-label="キャラクタープレビュー"></canvas>
+        <button class="stage-expand" id="stageExpand" type="button" aria-label="プレビューを全画面表示" aria-pressed="false" title="プレビューを全画面表示">
+          <span aria-hidden="true">⛶</span>
+        </button>
+        <div class="empty-stage" id="emptyStage">
+          <div class="empty-icon">＋</div>
+          <strong>キャラクターを追加</strong>
+          <span>右のパネルから画像を選択してください</span>
+        </div>
+        <div class="timecode" id="timecode">00:00 / 00:00</div>
+        <div class="expression-pill" id="expressionPill">NEUTRAL</div>
+      </div>
+      <div class="transport">
+        <button class="round" id="rewind" title="先頭に戻る">↶</button>
+        <button class="play" id="playButton"><span>▶</span> プレビュー</button>
+        <div class="timeline" id="timeline" role="slider" tabindex="0" aria-label="プレビュー再生位置" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="timelineFill"></div><i id="timelineHandle"></i></div>
+        <button class="export" id="exportButton">MP4を書き出す <span>↗</span></button>
+        <button class="cancel-action" id="cancelExport" type="button" hidden>書き出しを中止</button>
+      </div>
+    </section>
+
+    <aside class="editor">
+      <nav class="tabs" aria-label="編集パネル">
+        <button class="active" data-tab="script">台本</button>
+        <button data-tab="character">キャラクター</button>
+        <button data-tab="voice">音声</button>
+      </nav>
+
+      <section class="tab active" id="tab-script">
+        <div class="section-head"><div><small>01 / SCRIPT</small><h1>話す内容</h1></div><span class="count" id="charCount">0 文字</span></div>
+        <div class="work-metadata">
+          <label>タイトル <input id="workTitle" type="text" placeholder="作品名"></label>
+          <label>著者 <input id="workAuthor" type="text" placeholder="著者名"></label>
+          <label class="publication-field">初出 <input id="workPublication" type="text" placeholder="例：「帝国文学」1915（大正4）年11月号"></label>
+          <small>入力すると、本文の前にタイトルと著者を読み上げます。</small>
+        </div>
+        <div class="title-card-editor">
+          <label>動画冒頭のテキスト <textarea id="openingText" rows="3" placeholder="{{title}}、{{author}}、{{publication}} を使用できます">{{title}}
+{{author}}
+{{publication}}</textarea></label>
+          <label class="card-duration">表示秒数 <input id="openingDuration" type="number" min="1" max="20" step="0.5" value="3"></label>
+          <label>動画最後のテキスト <textarea id="endingText" rows="2" placeholder="空欄なら終了カードを追加しません">ありがとうございました。</textarea></label>
+          <label class="card-duration">表示秒数 <input id="endingDuration" type="number" min="1" max="20" step="0.5" value="3"></label>
+        </div>
+        <div class="aozora-import">
+          <label for="aozoraUrl">青空文庫から読み込む</label>
+          <div><input id="aozoraUrl" type="url" value="https://www.aozora.gr.jp/cards/000879/card127.html" placeholder="図書カードURL"><button id="importAozora" type="button">本文を取得</button></div>
+          <small id="aozoraStatus">XHTML版の本文とルビを取り込みます</small>
+        </div>
+        <textarea id="scriptInput" rows="10" spellcheck="true" placeholder="ここにキャラクターが話す文章を入力します。">こんにちは！朗読娘へようこそ。[happy] テキストと一枚の画像から、表情豊かなキャラクター動画を作れます。[surprised] とても簡単でしょう？</textarea>
+        <div class="english-ruby-panel" id="englishRubyPanel" hidden>
+          <div><strong>英語の読み</strong><small id="englishRubySummary"></small></div>
+          <div class="english-ruby-list" id="englishRubyList"></div>
+          <button id="applyEnglishRuby" type="button">台本へルビを反映</button>
+        </div>
+        <div class="script-voice-actions">
+          <div><strong>この台本から音声を生成</strong><small>音声タブの声・速度・品質設定を使用します</small></div>
+          <div class="generation-actions"><button id="generateVoiceFromScript" type="button">音声を生成</button><button class="secondary-action" id="generateVoiceAndExport" type="button">音声生成 → MP4</button><button class="save-audio-action" id="saveAudioFromScript" type="button" disabled>音声を保存</button><button class="cancel-action" id="cancelVoiceFromScript" type="button" hidden>中止</button></div>
+          <label class="caption-toggle">朗読中の文章を画面に表示 <input id="showCaptions" type="checkbox" checked></label>
+          <label class="caption-effect">字幕エフェクト
+            <select id="captionEffect"><option value="wind">風フェード</option><option value="twist">黒文字・斜めツイスト</option><option value="fixed-panel" selected>白い固定パネル・先読み</option></select>
+          </label>
+          <div class="caption-controls">
+            <label>文字の大きさ <output id="captionSizeOut">27px</output><input id="captionSize" type="range" min="24" max="72" value="27" step="1"></label>
+            <label>左端の位置 <output id="captionXOut">7%</output><input id="captionX" type="range" min="2" max="60" value="7" step="1"></label>
+            <label>縦の位置 <output id="captionYOut">49%</output><input id="captionY" type="range" min="15" max="90" value="49" step="1"></label>
+          </div>
+        </div>
+        <p class="hint">文章の前に表情タグを入れると、再生中に表情が切り替わります。英語の固有名詞は「｜London《ロンドン》」の形式で読みを指定できます。</p>
+        <div class="chips" id="expressionChips">
+          <button data-tag="neutral">ふつう</button><button data-tag="happy">笑顔</button><button data-tag="sad">悲しい</button><button data-tag="angry">怒り</button><button data-tag="surprised">驚き</button>
+        </div>
+        <div class="script-map" id="scriptMap"></div>
+      </section>
+
+      <section class="tab" id="tab-character">
+        <div class="section-head"><div><small>02 / CHARACTER</small><h1>立ち絵と表情</h1></div></div>
+        <div class="layer-editor">
+          <small>プレビューで移動するレイヤー</small>
+          <div class="layer-buttons" id="layerButtons">
+            <button type="button" data-layer="background">背面</button>
+            <button class="active" type="button" data-layer="character">キャラクター</button>
+            <button type="button" data-layer="foreground">前面</button>
+          </div>
+          <button class="layer-reset" id="resetLayerPosition" type="button">選択レイヤーの位置を戻す</button>
+        </div>
+        <div class="scene-upload-grid">
+          <label>背景画像 <em id="backgroundName">サンプル</em><input type="file" id="backgroundImage" accept="image/*"></label>
+          <label>前面画像 <em id="foregroundName">サンプル</em><input type="file" id="foregroundImage" accept="image/*"></label>
+        </div>
+        <p class="hint">レイヤーを選択してプレビュー上をドラッグすると配置を変更できます。画像ファイルをプレビューへドロップして差し替えることもできます。</p>
+        <label class="upload primary-upload">
+          <span><strong>基本の立ち絵</strong><small>PNG / JPG / WebP</small></span><b>画像を選択</b>
+          <input type="file" id="baseImage" accept="image/png,image/jpeg,image/webp">
+        </label>
+        <p class="hint">透過PNGがおすすめです。表情差分は任意です。</p>
+        <div class="variant-grid">
+          <label>笑顔 <em id="happyName">未設定</em><input type="file" data-expression="happy" accept="image/*"></label>
+          <label>悲しい <em id="sadName">未設定</em><input type="file" data-expression="sad" accept="image/*"></label>
+          <label>怒り <em id="angryName">未設定</em><input type="file" data-expression="angry" accept="image/*"></label>
+          <label>驚き <em id="surprisedName">未設定</em><input type="file" data-expression="surprised" accept="image/*"></label>
+        </div>
+        <div class="expression-preview">
+          <small>表情アクションを確認</small>
+          <div id="expressionPreviewButtons">
+            <button class="active" type="button" data-preview-expression="neutral">ふつう</button>
+            <button type="button" data-preview-expression="happy">笑顔</button>
+            <button type="button" data-preview-expression="sad">悲しい</button>
+            <button type="button" data-preview-expression="angry">怒り</button>
+            <button type="button" data-preview-expression="surprised">驚き</button>
+          </div>
+        </div>
+        <div class="controls">
+          <label>立ち絵の大きさ <output id="characterScaleOut">91%</output><input id="characterScale" type="range" min="60" max="180" value="91"></label>
+          <label>背景の大きさ <output id="backgroundScaleOut">100%</output><input id="backgroundScale" type="range" min="70" max="200" value="100"></label>
+          <label>前面の大きさ <output id="foregroundScaleOut">72%</output><input id="foregroundScale" type="range" min="40" max="200" value="72"></label>
+          <label>顔の揺れ <output id="characterMotionOut">100%</output><input id="characterMotion" type="range" min="0" max="200" value="100"></label>
+          <label>髪の追従 <output id="hairMotionOut">100%</output><input id="hairMotion" type="range" min="0" max="200" value="100"></label>
+          <label>膝の動き <output id="legMotionOut">100%</output><input id="legMotion" type="range" min="0" max="200" value="100"></label>
+          <label>口の横位置 <output id="mouthXOut">52%</output><input id="mouthX" type="range" min="10" max="90" value="52"></label>
+          <label>口の縦位置 <output id="mouthYOut">35%</output><input id="mouthY" type="range" min="20" max="90" value="35"></label>
+          <label>口の大きさ <output id="mouthSizeOut">37%</output><input id="mouthSize" type="range" min="30" max="250" value="37"></label>
+          <label class="mouth-toggle">生成した口パーツを使う <input id="useMouthSprites" type="checkbox" checked></label>
+        </div>
+      </section>
+
+      <section class="tab" id="tab-voice">
+        <div class="section-head"><div><small>03 / VOICE</small><h1>音声</h1></div></div>
+        <div class="voice-card">
+          <div><strong id="ttsEngineName">Irodori-TTS</strong><small id="ttsEngineStatus">接続状態を確認中…</small></div>
+          <label>エンジン <select id="ttsEngine"><option value="irodori" selected>Irodori-TTS</option><option value="voicevox">VOICEVOX</option></select></label>
+          <div class="engine-settings" id="voicevoxSettings" hidden>
+            <label>話者ID <input id="speakerId" type="number" value="3" min="0"></label>
+          </div>
+          <div class="engine-settings" id="irodoriSettings">
+            <label>声ID <input id="irodoriVoice" type="text" value="vd_husky_30s_c" maxlength="80" placeholder="none または登録した声ID"></label>
+            <label class="caption-field">話し方 <textarea id="irodoriCaption" rows="3" placeholder="声質や話し方を入力">静かな文芸朗読。一定で軽快なテンポを保ち、発音は明瞭に、言葉をつなげすぎず丁寧に読む。地の文は穏やかで抑揚を控えめにし、会話文だけ感情を自然に少し加える。語頭は柔らかく、語尾を急に切らず滑らかに収める。ブレスは長い区切りにだけ控えめに入れ、長時間聞いても疲れにくい自然な語り口にする。</textarea></label>
+            <label>生成品質 <select id="irodoriQuality"><option value="high">高音質（56ステップ）</option><option value="standard">標準（40ステップ）</option><option value="draft">高速確認（24ステップ）</option><option value="turbo" selected>超高速（16ステップ＋Sway）</option></select></label>
+            <label>語頭の柔らかさ <input id="irodoriAttackFade" type="range" value="40" min="0" max="120" step="5"><output id="irodoriAttackFadeOut">40ms</output></label>
+            <div class="reference-upload">
+              <label><span>参照音声</span><input id="irodoriReference" type="file" accept="audio/*"><em id="irodoriReferenceName">未選択</em></label>
+              <button id="uploadIrodoriVoice" type="button">声を登録</button>
+            </div>
+            <small>自分で使用許可を持つ音声だけを登録してください。</small>
+          </div>
+          <label>速度 <input id="voiceSpeed" type="range" value="1.25" min="0.5" max="2" step="0.05"><output id="voiceSpeedOut">1.25×</output></label>
+          <div class="voice-generation-actions"><button id="generateVoice">台本から音声を生成</button><button class="save-audio-action" id="saveAudio" type="button" disabled>音声を保存</button><button class="cancel-action" id="cancelVoice" type="button" hidden>音声生成を中止</button></div>
+        </div>
+        <div class="or"><span>または</span></div>
+        <label class="upload">
+          <span><strong>音声ファイルを使用</strong><small id="audioName">WAV / MP3 / M4A / OGG</small></span><b>選択</b>
+          <input type="file" id="audioFile" accept="audio/*">
+        </label>
+        <p class="hint">音声の波形から口の開きを自動計算します。音声なしでも文字数をもとに仮アニメーションを作れます。</p>
+        <div class="bgm-card">
+          <div><strong>BGM</strong><small id="bgmName">BGMなし</small></div>
+          <label>サンプル
+            <select id="bgmPreset">
+              <option value="gogatsunokaze">5月の風</option>
+              <option value="irishnokaze">アイリッシュの風</option>
+              <option value="musmus105a">卒業（音楽室ver.）</option>
+              <option value="musmus105b">卒業（体育館ver.）</option>
+              <option value="seiya">聖夜</option>
+              <option value="custom" disabled>選択したファイル</option>
+              <option value="" selected>BGMなし</option>
+            </select>
+          </label>
+          <label>音量 <input id="bgmVolume" type="range" value="18" min="0" max="100" step="1"><output id="bgmVolumeOut">18%</output></label>
+          <label class="bgm-loop">最後までループする <input id="bgmLoop" type="checkbox" checked></label>
+          <label class="bgm-upload"><span>別のBGMを選択</span><em id="bgmFileName">MP3 / WAV / M4A / OGG</em><input id="bgmFile" type="file" accept="audio/*"></label>
+        </div>
+        <div class="bgm-card ambient-card">
+          <div><strong>環境音</strong><small id="ambientName">田園風景 · サンプル</small></div>
+          <label>サンプル
+            <select id="ambientPreset">
+              <option value="wind">風</option>
+              <option value="pastoral" selected>田園風景</option>
+              <option value="custom" disabled>選択したファイル</option>
+              <option value="">環境音なし</option>
+            </select>
+          </label>
+          <label>音量 <input id="ambientVolume" type="range" value="12" min="0" max="100" step="1"><output id="ambientVolumeOut">12%</output></label>
+          <label class="bgm-loop">最後までループする <input id="ambientLoop" type="checkbox" checked></label>
+          <label class="bgm-upload"><span>別の環境音を選択</span><em id="ambientFileName">MP3 / WAV / M4A / OGG</em><input id="ambientFile" type="file" accept="audio/*"></label>
+        </div>
+      </section>
+
+      <div class="notice" id="notice" role="status"></div>
+    </aside>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

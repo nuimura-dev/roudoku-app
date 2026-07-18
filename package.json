@@ -1,0 +1,21 @@
+{
+  "name": "vt-reader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc && mkdir -p dist/public/assets/character-reader/mouth dist/public/assets/scene-samples dist/public/assets/bgm dist/public/assets/sounds && cp public/index.html public/style.css dist/public/ && cp assets/character-reader/base.png assets/character-reader/happy.png assets/character-reader/happy-mouthless.png assets/character-reader/sad.png assets/character-reader/angry.png assets/character-reader/surprised.png dist/public/assets/character-reader/ && cp assets/character-reader/mouth/closed.png assets/character-reader/mouth/a.png assets/character-reader/mouth/i.png assets/character-reader/mouth/u.png assets/character-reader/mouth/e.png assets/character-reader/mouth/o.png dist/public/assets/character-reader/mouth/ && cp assets/scene-samples/reading-room.png assets/scene-samples/desk-foreground.png dist/public/assets/scene-samples/ && cp assets/bgm/*.mp3 dist/public/assets/bgm/ && cp assets/sounds/*.mp3 dist/public/assets/sounds/",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && node dist/server.js",
+    "start:irodori": "bash ./start-with-irodori.sh",
+    "dev": "npm run build && node --watch dist/server.js",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

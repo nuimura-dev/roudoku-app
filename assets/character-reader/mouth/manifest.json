@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "canvas": { "width": 1254, "height": 1254 },
+  "anchor": { "x": 0.5, "y": 0.5 },
+  "visemes": {
+    "closed": "closed.png",
+    "a": "a.png",
+    "i": "i.png",
+    "u": "u.png",
+    "e": "e.png",
+    "o": "o.png"
+  }
+}

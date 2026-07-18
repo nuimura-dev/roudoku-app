@@ -1,0 +1,35 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+.cache/
+*.tsbuildinfo
+
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+
+# Logs and OS/editor files
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Generated exports and saved projects
+output/
+exports/
+/*.wav
+/*.mp3
+/*.m4a
+/*.ogg
+/*.mp4
+/*.webm
+/*.roudoku.json
+/*.vtreader.json
+
+# Local reference voices (potentially personal/licensed voice data)
+assets/voices/*
+!assets/voices/.gitkeep
