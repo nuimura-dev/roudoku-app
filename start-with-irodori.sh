@@ -52,8 +52,7 @@ stop_managed() {
   local label="$1" file="$2" pid
   if ! pid="$(managed_pid "${file}")"; then
     rm -f "${file}"
-    echo "${label}: このスクリプトが起動したプロセスはありません。"
-    return 0
+    return 1
   fi
 
   echo "${label}を終了しています… (PID ${pid})"
@@ -70,9 +69,36 @@ stop_managed() {
   rm -f "${file}"
 }
 
+legacy_app_pid() {
+  local port="${PORT:-4173}" pid cwd command
+  command -v ss >/dev/null 2>&1 || return 1
+  pid="$(ss -ltnpH "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  cwd="$(readlink "/proc/${pid}/cwd" 2>/dev/null)" || return 1
+  command="$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null)" || return 1
+  [[ "${cwd}" == "${ROOT_DIR}" && "${command}" == *"node dist/server.js"* ]] || return 1
+  printf '%s\n' "${pid}"
+}
+
+stop_legacy_app() {
+  local pid
+  pid="$(legacy_app_pid)" || return 1
+  echo "朗読娘の旧起動プロセスを終了しています… (PID ${pid})"
+  kill -TERM "${pid}" 2>/dev/null || return 1
+  for _ in {1..100}; do
+    kill -0 "${pid}" 2>/dev/null || return 0
+    sleep .1
+  done
+  echo "朗読娘の旧起動プロセスが終了しないため強制終了します。" >&2
+  kill -KILL "${pid}" 2>/dev/null || true
+}
+
 stop_all() {
-  stop_managed "朗読娘" "${APP_PID_FILE}"
-  stop_managed "Irodori-TTS Server" "${IRODORI_PID_FILE}"
+  if ! stop_managed "朗読娘" "${APP_PID_FILE}"; then
+    stop_legacy_app || echo "朗読娘: このスクリプトが起動したプロセスはありません。"
+  fi
+  stop_managed "Irodori-TTS Server" "${IRODORI_PID_FILE}" \
+    || echo "Irodori-TTS Server: このスクリプトが起動したプロセスはありません。"
   rmdir "${RUNTIME_DIR}" 2>/dev/null || true
 }
 
@@ -80,6 +106,8 @@ status_all() {
   local pid
   if pid="$(managed_pid "${APP_PID_FILE}")"; then
     echo "朗読娘: 起動中 (PID ${pid}, http://localhost:${PORT:-4173})"
+  elif pid="$(legacy_app_pid)"; then
+    echo "朗読娘: 旧スクリプトから起動中 (PID ${pid}, http://localhost:${PORT:-4173})"
   else
     echo "朗読娘: 停止中"
   fi
@@ -102,6 +130,11 @@ start_all() {
   if existing_pid="$(managed_pid "${APP_PID_FILE}")"; then
     echo "朗読娘はすでに起動しています (PID ${existing_pid})。"
     echo "再起動する場合: $0 restart"
+    return 1
+  fi
+  if existing_pid="$(legacy_app_pid)"; then
+    echo "朗読娘が旧スクリプトから起動しています (PID ${existing_pid})。" >&2
+    echo "停止する場合: $0 stop / 再起動する場合: $0 restart" >&2
     return 1
   fi
   rm -f "${APP_PID_FILE}"
@@ -167,6 +200,8 @@ case "${ACTION}" in
   stop) stop_all ;;
   restart)
     stop_all
+    # 旧スクリプトのEXITトラップによるIrodori終了を待ってから再判定する。
+    sleep 1
     start_all
     ;;
   status) status_all ;;

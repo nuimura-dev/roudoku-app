@@ -1,5 +1,6 @@
 import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, plainText, type ActiveCaption, type CaptionCue, type Expression } from './script.js';
 import { matchTimelineAnchors } from './alignment.js';
+import { createProjectBundle, maxProjectBundleBytes, readProjectBundle } from './project-bundle.js';
 
 type Viseme = 'closed' | 'a' | 'i' | 'u' | 'e' | 'o';
 type SceneLayer = 'background' | 'character' | 'foreground';
@@ -106,6 +107,9 @@ const elements = {
   applyPronunciationCorrections: required<HTMLButtonElement>('#applyPronunciationCorrections'),
   repairPronunciationAudio: required<HTMLButtonElement>('#repairPronunciationAudio'),
   pronunciationRepairStatus: required<HTMLElement>('#pronunciationRepairStatus'),
+  pronunciationPreviewList: required<HTMLElement>('#pronunciationPreviewList'),
+  repairAudioPreview: required<HTMLElement>('#repairAudioPreview'),
+  repairAudioPreviewList: required<HTMLElement>('#repairAudioPreviewList'),
   expressionPill: required<HTMLElement>('#expressionPill'),
   timeline: required<HTMLElement>('#timeline'),
   timelineFill: required<HTMLElement>('#timelineFill'),
@@ -169,6 +173,8 @@ const elements = {
   generateVoiceAndExport: required<HTMLButtonElement>('#generateVoiceAndExport'),
   saveAudio: required<HTMLButtonElement>('#saveAudio'),
   saveAudioFromScript: required<HTMLButtonElement>('#saveAudioFromScript'),
+  declickAudio: required<HTMLButtonElement>('#declickAudio'),
+  declickAudioFromScript: required<HTMLButtonElement>('#declickAudioFromScript'),
   cancelVoice: required<HTMLButtonElement>('#cancelVoice'),
   cancelVoiceFromScript: required<HTMLButtonElement>('#cancelVoiceFromScript'),
   saveProject: required<HTMLButtonElement>('#saveProject'),
@@ -217,9 +223,15 @@ const state: AppState = {
   expressionTransitionStartedAt: Number.NEGATIVE_INFINITY, currentViseme: 'closed', session: null, captionCues: [], captionTimes: null
 };
 let voiceGenerationController: AbortController | null = null;
+let pronunciationPreviewController: AbortController | null = null;
+let pronunciationPreviewAudio: HTMLAudioElement | null = null;
+let pronunciationPreviewUrl: string | null = null;
+let pronunciationPreviewButton: HTMLButtonElement | null = null;
+let repairPreviewClips: Array<{ label: string; blob: Blob }> = [];
 let exportController: AbortController | null = null;
 let exportCancelled = false;
 let combinedWorkflowRunning = false;
+let declickAudioRunning = false;
 const expressionTransitionDuration = .42;
 const colors: Record<Expression, string> = {
   neutral: '#a6a39c', happy: '#d8ff45', sad: '#70a7ff', angry: '#ff6b53', surprised: '#d994ff'
@@ -248,7 +260,12 @@ const defaultBgmAssets: Record<string, { url: string; label: string }> = {
   irishnokaze: { url: '/assets/bgm/irishnokaze.mp3', label: 'アイリッシュの風' },
   musmus105a: { url: '/assets/bgm/MusMus-BGM-105a.mp3', label: '卒業（音楽室ver.）' },
   musmus105b: { url: '/assets/bgm/MusMus-BGM-105b.mp3', label: '卒業（体育館ver.）' },
-  seiya: { url: '/assets/bgm/seiya.mp3', label: '聖夜' }
+  seiya: { url: '/assets/bgm/seiya.mp3', label: '聖夜' },
+  jinroKomoriuta: { url: '/assets/bgm/jinro-no-tame-no-komoriuta.mp3', label: '人狼の為の子守唄' },
+  tsurugiNoAruji: { url: '/assets/bgm/tsurugi-no-aruji.mp3', label: '剣の主' },
+  kamikakushiNoShinso: { url: '/assets/bgm/kamikakushi-no-shinso.mp3', label: '神隠しの真相' },
+  tsuioku: { url: '/assets/bgm/tsuioku.mp3', label: '追憶' },
+  ameNoHiNoNiwa: { url: '/assets/bgm/ame-no-hi-no-niwa.mp3', label: '雨の日の庭' }
 };
 const defaultAmbientAssets: Record<string, { url: string; label: string }> = {
   wind: { url: '/assets/sounds/VSQSE_0613_wind_04.mp3', label: '風' },
@@ -290,12 +307,16 @@ function formatTime(seconds: number): string {
 function metadataNarration(): string {
   const title = elements.workTitle.value.trim();
   const author = elements.workAuthor.value.trim();
-  return [title ? `作品名、${title}。` : '', author ? `著者、${author}。` : ''].filter(Boolean).join('');
+  const readings = pronunciationReadings(false);
+  const spokenTitle = applyJapaneseRubyCorrections(title, readings);
+  const spokenAuthor = applyJapaneseRubyCorrections(author, readings);
+  return [title ? `作品名、${spokenTitle}。` : '', author ? `著者、${spokenAuthor}。` : ''].filter(Boolean).join('');
 }
 
 function playbackScriptSource(): string {
   const metadata = metadataNarration();
-  return metadata ? `[neutral]${metadata} ${elements.script.value}` : elements.script.value;
+  const script = applyJapaneseRubyCorrections(elements.script.value, pronunciationReadings(false));
+  return metadata ? `[neutral]${metadata} ${script}` : script;
 }
 
 function estimatedNarrationDuration(): number {
@@ -1332,12 +1353,23 @@ function clearNarrationAudio(): void {
   state.audioCaptionTimes = null;
   elements.saveAudio.disabled = true;
   elements.saveAudioFromScript.disabled = true;
+  elements.declickAudio.disabled = true;
+  elements.declickAudioFromScript.disabled = true;
+}
+
+function resetPlaybackPosition(): void {
+  state.progress = 0;
+  state.overallProgress = 0;
+  state.playbackElapsed = 0;
+  state.playbackPhase = 'idle';
 }
 
 async function loadLongAudio(blob: Blob, name: string, scriptSource: string): Promise<void> {
   const url = URL.createObjectURL(blob);
   const audio = new Audio();
   audio.preload = 'metadata';
+  audio.muted = false;
+  audio.volume = 1;
   try {
     await new Promise<void>((resolve, reject) => {
       audio.addEventListener('loadedmetadata', () => resolve(), { once: true });
@@ -1352,8 +1384,11 @@ async function loadLongAudio(blob: Blob, name: string, scriptSource: string): Pr
     state.audioBlob = blob;
     state.audioName = name;
     state.audioScriptSource = scriptSource;
+    resetPlaybackPosition();
     elements.saveAudio.disabled = false;
     elements.saveAudioFromScript.disabled = false;
+    elements.declickAudio.disabled = false;
+    elements.declickAudioFromScript.disabled = false;
     elements.audioName.textContent = `${name} · ${formatTime(audio.duration)} · 長編省メモリ`;
     notify('長編音声を省メモリモードで読み込みました。WAVの無音位置をバックグラウンドで解析しています。', true);
     draw();
@@ -1398,6 +1433,8 @@ function scheduleLongCaptionAlignment(blob: Blob): void {
 
 async function loadAudio(blob: Blob, name: string, scriptSource = playbackScriptSource()): Promise<void> {
   const ac = await ensureAudioContext();
+  if (state.playing) stopPlayback(true);
+  clearRepairAudioPreviews();
   try {
     if (blob.size > 48 * 1024 * 1024) {
       await loadLongAudio(blob, name, scriptSource);
@@ -1407,13 +1444,19 @@ async function loadAudio(blob: Blob, name: string, scriptSource = playbackScript
     clearNarrationAudio();
     state.audioBuffer = buffer; state.audioBlob = blob; state.audioName = name;
     state.audioScriptSource = scriptSource;
+    resetPlaybackPosition();
     elements.saveAudio.disabled = false;
     elements.saveAudioFromScript.disabled = false;
+    elements.declickAudio.disabled = false;
+    elements.declickAudioFromScript.disabled = false;
     elements.audioName.textContent = `${name} · ${formatTime(buffer.duration)}`;
     notify('音声を読み込みました。字幕タイミングをバックグラウンドで補正しています。', true);
     draw();
     scheduleCaptionAlignment(buffer);
-  } catch { notify('この音声形式をブラウザで読み込めませんでした。WAVまたはMP3をお試しください。'); }
+  } catch (error) {
+    notify('この音声形式をブラウザで読み込めませんでした。WAVまたはMP3をお試しください。');
+    throw error;
+  }
 }
 
 async function loadBgm(blob: Blob, name: string, announce = true): Promise<void> {
@@ -1570,7 +1613,9 @@ function animationLoop(session: PlaybackSession, start: number, analyser: Analys
   } else {
     state.mouth = 0;
   }
-  const punctuationPause = narrating && isPunctuationPause(playbackScriptSource(), state.progress);
+  // 実音声を解析できる場合、無音も波形へ現れる。文字数から推定した句読点位置で
+  // 強制的に閉じると、実際の読み速度が一定でない長編ほど口の動きがずれてしまう。
+  const punctuationPause = narrating && !analyser && isPunctuationPause(playbackScriptSource(), state.progress);
   if (punctuationPause) state.mouth = 0;
   if (state.mouth < .08) state.currentViseme = 'closed';
   else if (state.mouth < .25) state.currentViseme = Math.floor(elapsed * 3) % 2 === 0 ? 'i' : 'u';
@@ -1617,6 +1662,8 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
     session.source.connect(analyser); analyser.connect(ac.destination);
     if (destination) analyser.connect(destination);
   } else if (state.audioElement) {
+    // 省メモリで読み込んだ長編音声も、通常プレビュー・録画の両方で実波形を使う。
+    // MediaElementSourceは同じaudio要素に一度しか作れないためstateへ保持する。
     state.audioMediaNode ??= ac.createMediaElementSource(state.audioElement);
     state.audioMediaNode.disconnect();
     analyser = ac.createAnalyser(); analyser.fftSize = 512; data = new Uint8Array(analyser.fftSize);
@@ -1733,24 +1780,44 @@ async function exportVideo(): Promise<void> {
   exportCancelled = false;
   elements.cancelExport.hidden = false;
   elements.exportButton.disabled = true;
+  const totalStartedAt = performance.now();
+  let conversionStartedAt: number | null = null;
+  let finalStatus = '準備完了';
+  const elapsedText = (startedAt: number): string => formatTime((performance.now() - startedAt) / 1000);
+  const updateExportElapsed = (): void => {
+    elements.statusText.textContent = conversionStartedAt === null
+      ? `録画中 · 経過 ${elapsedText(totalStartedAt)}`
+      : `MP4変換中 · 変換 ${elapsedText(conversionStartedAt)} · 合計 ${elapsedText(totalStartedAt)}`;
+  };
+  updateExportElapsed();
+  const elapsedTimer = window.setInterval(updateExportElapsed, 1000);
   try {
     const webm = await beginPlayback({ record: true }); if (!webm) return;
-    elements.statusText.textContent = 'MP4変換中'; notify('録画が完了しました。MP4に変換しています…', true);
+    conversionStartedAt = performance.now();
+    updateExportElapsed();
+    notify('録画が完了しました。GPUデコードを優先してMP4に変換しています…', true);
     exportController = new AbortController();
     const response = await fetch('/api/export', { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: webm, signal: exportController.signal });
     if (!response.ok) { const data = await response.json() as { error?: string }; throw new Error(data.error ?? 'MP4変換に失敗しました。'); }
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement('a'); link.href = url; link.download = 'character-video.mp4'; link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 3000); notify('MP4を書き出しました。', true);
+    const conversionTime = conversionStartedAt === null ? '00:00' : elapsedText(conversionStartedAt);
+    const totalTime = elapsedText(totalStartedAt);
+    finalStatus = `書き出し完了 · 変換 ${conversionTime} · 合計 ${totalTime}`;
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    notify(`MP4を書き出しました。変換 ${conversionTime}、合計 ${totalTime}かかりました。`, true);
   } catch (error) {
+    const totalTime = elapsedText(totalStartedAt);
+    finalStatus = exportCancelled ? `書き出し中止 · 経過 ${totalTime}` : `書き出し失敗 · 経過 ${totalTime}`;
     if (!exportCancelled) notify(errorMessage(error) || '動画の書き出しに失敗しました。');
   } finally {
+    window.clearInterval(elapsedTimer);
     exportController = null;
     exportCancelled = false;
     state.exporting = false;
     elements.exportButton.disabled = false;
     elements.cancelExport.hidden = true;
-    elements.statusText.textContent = '準備完了';
+    elements.statusText.textContent = finalStatus;
   }
 }
 
@@ -1789,12 +1856,17 @@ function projectControl(id: string): HTMLInputElement | HTMLTextAreaElement | HT
     : null;
 }
 
-function safeProjectFilename(value: string): string {
+function safeProjectFilename(value: string, bundled: boolean): string {
   const base = value.trim().replace(/[\\/:*?"<>|\u0000-\u001f]/gu, '_').slice(0, 80) || 'roudoku-app-project';
-  return `${base}.roudoku.json`;
+  return bundled ? `${base}.roudoku` : `${base}.roudoku.json`;
 }
 
-function saveProject(): void {
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(0, bytes / 1024).toFixed(1)} KB`;
+  return `${Math.max(0, bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function currentSavedProject(): SavedProject {
   const fields: Record<string, string | boolean> = {};
   for (const id of projectFieldIds) {
     const control = projectControl(id);
@@ -1805,11 +1877,10 @@ function saveProject(): void {
     elements.baseImage.files?.[0]?.name,
     elements.backgroundImage.files?.[0]?.name,
     elements.foregroundImage.files?.[0]?.name,
-    elements.audioFile.files?.[0]?.name,
     elements.bgmFile.files?.[0]?.name,
     elements.ambientFile.files?.[0]?.name
   ].filter((name): name is string => Boolean(name));
-  const project: SavedProject = {
+  return {
     format: 'roudoku-app-project',
     version: 1,
     savedAt: new Date().toISOString(),
@@ -1822,14 +1893,23 @@ function saveProject(): void {
     activeLayer: state.activeLayer,
     externalFiles
   };
-  const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+}
+
+function saveProject(): void {
+  const project = currentSavedProject();
+  const bundled = Boolean(state.audioBlob);
+  const blob = state.audioBlob
+    ? createProjectBundle(project, { blob: state.audioBlob, name: state.audioName })
+    : new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = safeProjectFilename(elements.workTitle.value);
+  link.download = safeProjectFilename(elements.workTitle.value, bundled);
   link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 3000);
-  notify('プロジェクト設定を保存しました。', true);
+  setTimeout(() => URL.revokeObjectURL(url), bundled ? 60_000 : 3000);
+  notify(bundled
+    ? `プロジェクトと朗読音声（${formatFileSize(state.audioBlob?.size ?? 0)}）を保存しました。`
+    : 'プロジェクト設定を保存しました。音声を読み込むか生成すると、次回は音声も同梱されます。', true);
 }
 
 function validOffset(value: unknown, fallback: LayerOffset): LayerOffset {
@@ -1841,8 +1921,10 @@ function validOffset(value: unknown, fallback: LayerOffset): LayerOffset {
 }
 
 async function loadProject(file: File): Promise<void> {
-  if (file.size > 5 * 1024 * 1024) throw new Error('プロジェクトファイルが大きすぎます');
-  const project = JSON.parse(await file.text()) as Partial<SavedProject> & { format?: string };
+  if (file.size > maxProjectBundleBytes) throw new Error('プロジェクトファイルが大きすぎます');
+  const bundle = await readProjectBundle(file);
+  if (!bundle && file.size > 5 * 1024 * 1024) throw new Error('プロジェクトファイルが大きすぎます');
+  const project = (bundle ? bundle.project : JSON.parse(await file.text())) as Partial<SavedProject> & { format?: string };
   const compatibleFormat = project.format === 'roudoku-app-project' || project.format === 'vt-reader-project';
   if (!compatibleFormat || project.version !== 1 || !project.fields) {
     throw new Error('朗読娘のプロジェクトファイルではありません');
@@ -1865,7 +1947,7 @@ async function loadProject(file: File): Promise<void> {
   setActiveLayer(activeLayer === 'background' || activeLayer === 'foreground' ? activeLayer : 'character');
 
   // 先に読み込まれた音声は維持し、プロジェクト側の台本・表示設定だけを復元する。
-  const preservedAudio = Boolean(state.audioBuffer || state.audioElement);
+  const preservedAudio = !bundle && Boolean(state.audioBuffer || state.audioElement);
   if (elements.bgmPreset.value === 'custom') elements.bgmPreset.value = '';
   if (elements.ambientPreset.value === 'custom') elements.ambientPreset.value = '';
   await Promise.all([
@@ -1875,21 +1957,25 @@ async function loadProject(file: File): Promise<void> {
   document.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(input => input.dispatchEvent(new Event('input')));
   updateTtsEngine();
   updateScript();
-  if (preservedAudio) {
+  if (bundle) {
+    await loadAudio(bundle.audio.blob, bundle.audio.name, playbackScriptSource());
+  } else if (preservedAudio) {
     state.audioScriptSource = playbackScriptSource();
     state.audioCaptionTimes = null;
   }
-  if (state.audioBuffer) {
+  if (!bundle && state.audioBuffer) {
     notify('プロジェクトの台本に合わせて字幕タイミングを再補正しています。', true);
     scheduleCaptionAlignment(state.audioBuffer);
-  } else if (state.audioElement && state.audioBlob) {
+  } else if (!bundle && state.audioElement && state.audioBlob) {
     notify('プロジェクトの台本に合わせて長編WAVの字幕タイミングを再補正しています。', true);
     scheduleLongCaptionAlignment(state.audioBlob);
   }
   state.progress = 0; state.overallProgress = 0; state.playbackElapsed = 0;
   draw();
   const externalCount = project.externalFiles?.length ?? 0;
-  notify(preservedAudio
+  notify(bundle
+    ? 'プロジェクトと同梱された朗読音声を読み込みました。'
+    : preservedAudio
     ? 'プロジェクトを読み込みました。先に読み込んだ音声は保持されています。'
     : externalCount > 0
       ? `プロジェクトを読み込みました。外部素材${externalCount}件は必要に応じて再選択してください。`
@@ -1931,12 +2017,15 @@ elements.applyEnglishRuby.addEventListener('click', () => {
   updateScript();
   notify('英単語の読みを台本へ反映しました。', true);
 });
-function pronunciationReadings(): Record<string, string> {
+function pronunciationReadings(strict = true): Record<string, string> {
   const readings: Record<string, string> = {};
   for (const [index, line] of elements.pronunciationCorrections.value.split(/\r?\n/u).entries()) {
     const separator = line.indexOf('=');
     if (!line.trim()) continue;
-    if (separator < 1 || !line.slice(separator + 1).trim()) throw new Error(`${index + 1}行目は「漢字=よみ」で入力してください`);
+    if (separator < 1 || !line.slice(separator + 1).trim()) {
+      if (strict) throw new Error(`${index + 1}行目は「フレーズ=よみ」で入力してください`);
+      continue;
+    }
     readings[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
   }
   return readings;
@@ -1945,19 +2034,22 @@ function pronunciationReadings(): Record<string, string> {
 elements.applyPronunciationCorrections.addEventListener('click', () => {
   try {
     const readings = pronunciationReadings();
-    if (!Object.keys(readings).length) { notify('修正する読みを入力してください。'); return; }
+    if (!Object.keys(readings).length) { notify('修正するフレーズと読みを入力してください。'); return; }
     const converted = applyJapaneseRubyCorrections(elements.script.value, readings);
-    if (converted === elements.script.value) { notify('新しく反映できる漢字がありません。'); return; }
-    elements.script.value = converted;
+    if (converted !== elements.script.value) elements.script.value = converted;
     updateScript();
-    elements.pronunciationRepairStatus.textContent = `${Object.keys(readings).length}語のルビを台本へ反映しました。音声を直す場合は右のボタンを押してください。`;
-    notify('漢字の読みを台本へ一括反映しました。', true);
+    elements.pronunciationRepairStatus.textContent = `${Object.keys(readings).length}件の読みをタイトル・著者・本文へ反映しました。音声を直す場合は右のボタンを押してください。`;
+    notify('フレーズの読みを反映しました。', true);
   } catch (error) {
     notify(errorMessage(error));
   }
 });
 elements.workTitle.addEventListener('input', updateScript);
 elements.workAuthor.addEventListener('input', updateScript);
+elements.pronunciationCorrections.addEventListener('input', () => {
+  updateScript();
+  renderPronunciationPreviewList();
+});
 elements.workPublication.addEventListener('input', () => draw());
 elements.openingText.addEventListener('input', () => draw());
 elements.endingText.addEventListener('input', () => draw());
@@ -2139,10 +2231,56 @@ function setVoiceGenerationState(generating: boolean): void {
   elements.generateVoiceFromScript.disabled = generating;
   elements.generateVoiceAndExport.disabled = generating || combinedWorkflowRunning;
   elements.repairPronunciationAudio.disabled = generating;
+  const canDeclick = Boolean(state.audioBlob) && !generating && !declickAudioRunning;
+  elements.declickAudio.disabled = !canDeclick;
+  elements.declickAudioFromScript.disabled = !canDeclick;
   elements.generateVoice.textContent = generating ? '音声を生成中…' : '台本から音声を生成';
   elements.generateVoiceFromScript.textContent = generating ? '音声を生成中…' : '音声を生成';
   elements.cancelVoice.hidden = !generating;
   elements.cancelVoiceFromScript.hidden = !generating;
+  elements.pronunciationPreviewList.querySelectorAll<HTMLButtonElement>('button').forEach(button => { button.disabled = generating; });
+  elements.repairAudioPreviewList.querySelectorAll<HTMLButtonElement>('button').forEach(button => { button.disabled = generating; });
+}
+
+async function removeNarrationClicks(): Promise<void> {
+  const source = state.audioBlob;
+  if (!source) { notify('先に音声を生成または読み込んでください。'); return; }
+  if (declickAudioRunning || voiceGenerationController || state.exporting) return;
+  if (state.playing) stopPlayback(true);
+  const sourceName = state.audioName;
+  const sourceScript = state.audioScriptSource ?? playbackScriptSource();
+  declickAudioRunning = true;
+  elements.declickAudio.disabled = true;
+  elements.declickAudioFromScript.disabled = true;
+  elements.declickAudio.textContent = 'ノイズ除去中…';
+  elements.declickAudioFromScript.textContent = 'ノイズ除去中…';
+  elements.statusText.textContent = 'パチパチノイズ除去中';
+  notify('短いパチパチ音を検出して除去しています…', true);
+  try {
+    const response = await fetch('/api/audio/declick', {
+      method: 'POST',
+      headers: { 'content-type': source.type || 'application/octet-stream' },
+      body: source
+    });
+    if (!response.ok) {
+      const data = await response.json() as { error?: string; detail?: string };
+      throw new Error(data.detail ?? data.error ?? 'パチパチノイズを除去できませんでした。');
+    }
+    const cleaned = await response.blob();
+    const baseName = sourceName.replace(/\.[^.]+$/u, '') || '朗読音声';
+    await loadAudio(cleaned, `${baseName}-ノイズ除去済み.wav`, sourceScript);
+    notify('パチパチノイズを除去しました。試聴後、「音声を保存」で別ファイルとして保存できます。', true);
+  } catch (error) {
+    notify(errorMessage(error));
+  } finally {
+    declickAudioRunning = false;
+    elements.declickAudio.textContent = 'パチパチノイズ除去';
+    elements.declickAudioFromScript.textContent = 'パチパチノイズ除去';
+    const canDeclick = Boolean(state.audioBlob);
+    elements.declickAudio.disabled = !canDeclick;
+    elements.declickAudioFromScript.disabled = !canDeclick;
+    if (!state.playing && !state.exporting) elements.statusText.textContent = '準備完了';
+  }
 }
 
 function saveNarrationAudio(): void {
@@ -2195,8 +2333,106 @@ async function fetchSpeech(text: string, signal: AbortSignal): Promise<{ blob: B
   return { blob: await response.blob(), name: request.name };
 }
 
+function stopPronunciationPreview(): void {
+  pronunciationPreviewAudio?.pause();
+  pronunciationPreviewAudio = null;
+  if (pronunciationPreviewUrl) URL.revokeObjectURL(pronunciationPreviewUrl);
+  pronunciationPreviewUrl = null;
+  if (pronunciationPreviewButton) pronunciationPreviewButton.textContent = pronunciationPreviewButton.dataset.label ?? '試聴';
+  pronunciationPreviewButton = null;
+}
+
+function playPronunciationPreview(blob: Blob, button: HTMLButtonElement): void {
+  if (pronunciationPreviewButton === button && pronunciationPreviewAudio && !pronunciationPreviewAudio.paused) {
+    stopPronunciationPreview();
+    return;
+  }
+  stopPronunciationPreview();
+  if (state.playing) stopPlayback();
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  audio.volume = 1;
+  audio.muted = false;
+  pronunciationPreviewUrl = url;
+  pronunciationPreviewAudio = audio;
+  pronunciationPreviewButton = button;
+  button.textContent = '■ 停止';
+  const finish = (): void => {
+    if (pronunciationPreviewAudio === audio) stopPronunciationPreview();
+  };
+  audio.addEventListener('ended', finish, { once: true });
+  audio.addEventListener('error', () => {
+    finish();
+    notify('試聴音声を再生できませんでした。');
+  }, { once: true });
+  void audio.play().catch(error => {
+    finish();
+    notify(`試聴音声を再生できませんでした: ${errorMessage(error)}`);
+  });
+}
+
+async function generatePronunciationPreview(reading: string, button: HTMLButtonElement): Promise<void> {
+  pronunciationPreviewController?.abort();
+  const controller = new AbortController();
+  pronunciationPreviewController = controller;
+  button.disabled = true;
+  button.textContent = '生成中…';
+  try {
+    const generated = await fetchSpeech(reading, controller.signal);
+    button.disabled = false;
+    playPronunciationPreview(generated.blob, button);
+  } catch (error) {
+    if (!controller.signal.aborted) notify(errorMessage(error));
+    button.disabled = false;
+    button.textContent = button.dataset.label ?? '読みだけ試聴';
+  } finally {
+    if (pronunciationPreviewController === controller) pronunciationPreviewController = null;
+  }
+}
+
+function pronunciationPreviewRow(label: string, detail: string, actionLabel: string, onPlay: (button: HTMLButtonElement) => void): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'pronunciation-preview-row';
+  const text = document.createElement('span');
+  text.textContent = `${label} → `;
+  const reading = document.createElement('em');
+  reading.textContent = detail;
+  text.append(reading);
+  text.title = `${label} → ${detail}`;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.dataset.label = actionLabel;
+  button.textContent = actionLabel;
+  button.addEventListener('click', () => onPlay(button));
+  row.append(text, button);
+  return row;
+}
+
+function renderPronunciationPreviewList(): void {
+  const readings = pronunciationReadings(false);
+  elements.pronunciationPreviewList.replaceChildren(...Object.entries(readings).map(([phrase, reading]) =>
+    pronunciationPreviewRow(`「${phrase}」`, reading, '読みだけ試聴', button => { void generatePronunciationPreview(reading, button); })
+  ));
+}
+
+function clearRepairAudioPreviews(): void {
+  stopPronunciationPreview();
+  repairPreviewClips = [];
+  elements.repairAudioPreview.hidden = true;
+  elements.repairAudioPreviewList.replaceChildren();
+}
+
+function setRepairAudioPreviews(clips: Array<{ label: string; blob: Blob }>): void {
+  repairPreviewClips = clips;
+  elements.repairAudioPreview.hidden = clips.length === 0;
+  elements.repairAudioPreviewList.replaceChildren(...clips.map((clip, index) =>
+    pronunciationPreviewRow(`修正${index + 1}`, clip.label, '差し替え文を試聴', button => playPronunciationPreview(clip.blob, button))
+  ));
+}
+
 async function generateScriptVoice(): Promise<boolean> {
   if (voiceGenerationController) return false;
+  if (state.playing) stopPlayback(true);
   const controller = new AbortController();
   voiceGenerationController = controller;
   setVoiceGenerationState(true);
@@ -2244,6 +2480,7 @@ function base64Url(value: string): string {
 
 async function repairPronunciationAudio(): Promise<void> {
   if (voiceGenerationController) return;
+  if (state.playing) stopPlayback(true);
   if (!state.audioBlob || !state.audioScriptSource) {
     notify('先に元の朗読音声を生成または読み込んでください。');
     return;
@@ -2295,9 +2532,11 @@ async function repairPronunciationAudio(): Promise<void> {
   elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の修正文を${forced ? '同じルビで強制' : ''}生成します。`;
   try {
     const replacements: Blob[] = [];
+    const replacementLabels: string[] = [];
     for (const [index, range] of ranges.entries()) {
       elements.repairPronunciationAudio.textContent = `修正文を生成中 ${index + 1}/${ranges.length}`;
       const text = afterCues.slice(range.from, range.to + 1).map(cue => cue.spoken).join('');
+      replacementLabels.push(afterCues.slice(range.from, range.to + 1).map(cue => cue.text).join(''));
       replacements.push((await fetchSpeech(text, controller.signal)).blob);
     }
     elements.repairPronunciationAudio.textContent = '元音声へ差し替え中…';
@@ -2320,6 +2559,7 @@ async function repairPronunciationAudio(): Promise<void> {
       throw new Error(data.detail ?? data.error ?? '修正文を元音声へ差し替えられませんでした。');
     }
     await loadAudio(await response.blob(), `${state.audioName.replace(/\.wav$/iu, '')}-読み修正版.wav`, currentSource);
+    setRepairAudioPreviews(replacements.map((blob, index) => ({ label: replacementLabels[index]!, blob })));
     elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の音声を修正しました。必要なら音声を保存してください。`;
     notify(`${ranges.length}区間の音声を${forced ? '同じルビで再生成' : '修正'}しました。`, true);
   } catch (error) {
@@ -2362,6 +2602,8 @@ elements.generateVoiceAndExport.addEventListener('click', () => { void generateV
 elements.repairPronunciationAudio.addEventListener('click', () => { void repairPronunciationAudio(); });
 elements.saveAudio.addEventListener('click', saveNarrationAudio);
 elements.saveAudioFromScript.addEventListener('click', saveNarrationAudio);
+elements.declickAudio.addEventListener('click', () => { void removeNarrationClicks(); });
+elements.declickAudioFromScript.addEventListener('click', () => { void removeNarrationClicks(); });
 elements.cancelVoice.addEventListener('click', cancelVoiceGeneration);
 elements.cancelVoiceFromScript.addEventListener('click', cancelVoiceGeneration);
 
@@ -2495,4 +2737,4 @@ document.addEventListener('keydown', event => {
 });
 window.addEventListener('beforeunload', () => stopPlayback());
 
-setActiveLayer('character'); updateTtsEngine(); updateScript(); draw(); void loadDefaultCharacter(); void loadBgmPreset(elements.bgmPreset.value, false); void loadAmbientPreset(elements.ambientPreset.value, false);
+setActiveLayer('character'); updateTtsEngine(); updateScript(); renderPronunciationPreviewList(); draw(); void loadDefaultCharacter(); void loadBgmPreset(elements.bgmPreset.value, false); void loadAmbientPreset(elements.ambientPreset.value, false);

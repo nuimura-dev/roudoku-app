@@ -283,20 +283,34 @@ async function convert(req: IncomingMessage, res: ServerResponse): Promise<void>
     await requestToFile(req, input, maxVideoUpload);
     try {
       await run('ffmpeg', [
-        '-y', '-i', input,
-        '-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq',
-        '-rc', 'vbr', '-cq', '21', '-b:v', '0', '-spatial_aq', '1', '-temporal_aq', '1',
-        '-profile:v', 'high', '-pix_fmt', 'yuv420p',
+        '-y', '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-i', input,
+        '-c:v', 'h264_nvenc', '-preset', 'p2', '-tune', 'hq',
+        '-rc', 'vbr', '-cq', '24', '-b:v', '6M', '-maxrate', '10M', '-bufsize', '12M',
+        // NVDECのCUDAフレームはそのままNVENCへ渡す。ここでCPU用yuv420pを
+        // 強制するとauto_scaleがCUDAフレームを変換できずフォールバックする。
+        '-profile:v', 'high',
         '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
       ], clientAbort.signal);
-    } catch (nvencError) {
-      if (clientAbort.signal.aborted) throw nvencError;
-      console.warn(`NVENCを利用できないためCPU変換へ切り替えます: ${errorMessage(nvencError)}`);
-      await run('ffmpeg', [
-        '-y', '-i', input,
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
-      ], clientAbort.signal);
+    } catch (nvdecError) {
+      if (clientAbort.signal.aborted) throw nvdecError;
+      console.warn(`NVDECを利用できないためCPUデコード＋NVENCへ切り替えます: ${errorMessage(nvdecError)}`);
+      try {
+        await run('ffmpeg', [
+          '-y', '-i', input,
+          '-c:v', 'h264_nvenc', '-preset', 'p2', '-tune', 'hq',
+          '-rc', 'vbr', '-cq', '24', '-b:v', '6M', '-maxrate', '10M', '-bufsize', '12M',
+          '-profile:v', 'high', '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
+        ], clientAbort.signal);
+      } catch (nvencError) {
+        if (clientAbort.signal.aborted) throw nvencError;
+        console.warn(`NVENCを利用できないためCPU変換へ切り替えます: ${errorMessage(nvencError)}`);
+        await run('ffmpeg', [
+          '-y', '-i', input,
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
+        ], clientAbort.signal);
+      }
     }
     const video = await stat(output);
     res.writeHead(200, {
@@ -388,11 +402,40 @@ async function repairAudio(req: IncomingMessage, res: ServerResponse): Promise<v
       '-c:a', 'pcm_s16le', output
     ], clientAbort.signal);
     const audio = await stat(output);
+    console.info(`部分音声の差し替え完了: ${ranges.length}区間 / ${(audio.size / 1024 / 1024).toFixed(1)}MB`);
     res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': audio.size });
     await pipeline(createReadStream(output), res);
   } catch (error) {
     if (!clientAbort.signal.aborted && !res.destroyed && !res.headersSent) {
       json(res, 500, { error: '修正文の音声を差し替えられませんでした', detail: errorMessage(error) });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function declickAudio(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'roudoku-audio-declick-'));
+  const input = join(dir, 'original-audio');
+  const output = join(dir, 'declicked.wav');
+  const clientAbort = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) clientAbort.abort(); });
+  try {
+    await requestToFile(req, input, maxVideoUpload);
+    const source = await stat(input);
+    if (source.size < 44) throw new Error('音声データがありません');
+    await run('ffmpeg', [
+      '-y', '-i', input, '-vn',
+      // 短い突発ノイズだけを対象にし、子音やブレスの変化を抑える。
+      '-af', 'adeclick=w=20:o=75:a=2:t=3:b=2:m=a',
+      '-ar', '48000', '-c:a', 'pcm_s16le', output
+    ], clientAbort.signal);
+    const audio = await stat(output);
+    res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': audio.size });
+    await pipeline(createReadStream(output), res);
+  } catch (error) {
+    if (!clientAbort.signal.aborted && !res.destroyed && !res.headersSent) {
+      json(res, 500, { error: 'パチパチノイズを除去できませんでした', detail: errorMessage(error) });
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -428,6 +471,7 @@ createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/api/aozora') return await importAozora(req, res);
     if (req.method === 'POST' && req.url === '/api/export') return await convert(req, res);
     if (req.method === 'POST' && req.url === '/api/audio/repair') return await repairAudio(req, res);
+    if (req.method === 'POST' && req.url === '/api/audio/declick') return await declickAudio(req, res);
     if (req.method === 'GET' && req.url === '/api/irodori/health') return await irodoriHealth(res);
     if (req.method === 'GET') return await staticFile(req, res);
     json(res, 405, { error: 'Method not allowed' });

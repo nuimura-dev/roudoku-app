@@ -56,6 +56,13 @@ test('複数の漢字へ読みを一括反映し、既存ルビは維持する',
   );
 });
 
+test('漢字を含むフレーズ全体へ読みを指定できる', () => {
+  assert.equal(
+    applyJapaneseRubyCorrections('作品名、羅生門。羅生門の下で待つ。', { '作品名、羅生門': 'さくひん、らしょうもん' }),
+    '｜作品名、羅生門《さくひん、らしょうもん》。羅生門の下で待つ。'
+  );
+});
+
 test('文字量に応じて現在の表情を返す', () => {
   assert.equal(expressionAt('[happy]123456[sad]12', 0.5), 'happy');
   assert.equal(expressionAt('[happy]123456[sad]12', 0.9), 'sad');

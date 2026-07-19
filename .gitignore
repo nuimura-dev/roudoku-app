@@ -33,3 +33,10 @@ exports/
 # Local reference voices (potentially personal/licensed voice data)
 assets/voices/*
 !assets/voices/.gitkeep
+
+# Locally installed DOVA-SYNDROME BGM (redistribution is not permitted)
+assets/bgm/ame-no-hi-no-niwa.mp3
+assets/bgm/jinro-no-tame-no-komoriuta.mp3
+assets/bgm/kamikakushi-no-shinso.mp3
+assets/bgm/tsuioku.mp3
+assets/bgm/tsurugi-no-aruji.mp3

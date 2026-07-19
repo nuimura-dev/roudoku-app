@@ -11,7 +11,7 @@
     <a class="brand" href="/" aria-label="朗読娘 ホーム"><span>朗読</span>娘</a>
     <div class="topbar-actions">
       <button id="saveProject" type="button">プロジェクト保存</button>
-      <label class="open-project">プロジェクト読込<input id="openProject" type="file" accept=".json,.roudoku.json,.vtreader.json,application/json"></label>
+      <label class="open-project">プロジェクト読込<input id="openProject" type="file" accept=".roudoku,.json,.roudoku.json,.vtreader.json,application/json,application/x-roudoku-project"></label>
       <div class="status"><i></i><span id="statusText">準備中</span></div>
     </div>
   </header>
@@ -75,17 +75,22 @@
           <button id="applyEnglishRuby" type="button">台本へルビを反映</button>
         </div>
         <div class="pronunciation-repair-panel">
-          <div><strong>漢字の読み修正</strong><small>複数指定可・同じ語は全箇所へ反映</small></div>
-          <textarea id="pronunciationCorrections" rows="3" placeholder="1行に1件、漢字=よみ&#10;例：狐狸=こり&#10;棲む=すむ"></textarea>
+          <div><strong>フレーズの読み修正</strong><small>タイトル・著者・本文／複数指定可</small></div>
+          <textarea id="pronunciationCorrections" rows="3" placeholder="1行に1件、フレーズ=よみ&#10;例：羅生門=らしょうもん&#10;饑死=うえじに"></textarea>
+          <div class="pronunciation-preview-list" id="pronunciationPreviewList"></div>
           <div class="pronunciation-repair-actions">
-            <button id="applyPronunciationCorrections" type="button">台本へルビを一括反映</button>
+            <button id="applyPronunciationCorrections" type="button">読み設定を反映</button>
             <button id="repairPronunciationAudio" class="secondary-action" type="button">変更文だけ音声を修正</button>
           </div>
-          <small id="pronunciationRepairStatus">既に同じルビでも、対象語を入力して音声修正を押すと該当文を再生成できます。</small>
+          <small id="pronunciationRepairStatus">表示は変えず音声だけ指定の読みにします。同じ設定でも該当文を強制再生成できます。</small>
+          <div class="repair-audio-preview" id="repairAudioPreview" hidden>
+            <strong>直前に修正した音声</strong>
+            <div id="repairAudioPreviewList"></div>
+          </div>
         </div>
         <div class="script-voice-actions">
           <div><strong>この台本から音声を生成</strong><small>音声タブの声・速度・品質設定を使用します</small></div>
-          <div class="generation-actions"><button id="generateVoiceFromScript" type="button">音声を生成</button><button class="secondary-action" id="generateVoiceAndExport" type="button">音声生成 → MP4</button><button class="save-audio-action" id="saveAudioFromScript" type="button" disabled>音声を保存</button><button class="cancel-action" id="cancelVoiceFromScript" type="button" hidden>中止</button></div>
+          <div class="generation-actions"><button id="generateVoiceFromScript" type="button">音声を生成</button><button class="secondary-action" id="generateVoiceAndExport" type="button">音声生成 → MP4</button><button class="save-audio-action" id="saveAudioFromScript" type="button" disabled>音声を保存</button><button class="secondary-action" id="declickAudioFromScript" type="button" disabled>パチパチノイズ除去</button><button class="cancel-action" id="cancelVoiceFromScript" type="button" hidden>中止</button></div>
           <label class="caption-toggle">朗読中の文章を画面に表示 <input id="showCaptions" type="checkbox" checked></label>
           <label class="caption-effect">字幕エフェクト
             <select id="captionEffect"><option value="wind">風フェード</option><option value="twist">黒文字・斜めツイスト</option><option value="fixed-panel" selected>白い固定パネル・先読み</option></select>
@@ -174,7 +179,7 @@
             <small>自分で使用許可を持つ音声だけを登録してください。</small>
           </div>
           <label>速度 <input id="voiceSpeed" type="range" value="1.25" min="0.5" max="2" step="0.05"><output id="voiceSpeedOut">1.25×</output></label>
-          <div class="voice-generation-actions"><button id="generateVoice">台本から音声を生成</button><button class="save-audio-action" id="saveAudio" type="button" disabled>音声を保存</button><button class="cancel-action" id="cancelVoice" type="button" hidden>音声生成を中止</button></div>
+          <div class="voice-generation-actions"><button id="generateVoice">台本から音声を生成</button><button class="save-audio-action" id="saveAudio" type="button" disabled>音声を保存</button><button class="secondary-action" id="declickAudio" type="button" disabled>パチパチノイズ除去</button><button class="cancel-action" id="cancelVoice" type="button" hidden>音声生成を中止</button></div>
         </div>
         <div class="or"><span>または</span></div>
         <label class="upload">
@@ -191,6 +196,11 @@
               <option value="musmus105a">卒業（音楽室ver.）</option>
               <option value="musmus105b">卒業（体育館ver.）</option>
               <option value="seiya">聖夜</option>
+              <option value="jinroKomoriuta">人狼の為の子守唄</option>
+              <option value="tsurugiNoAruji">剣の主</option>
+              <option value="kamikakushiNoShinso">神隠しの真相</option>
+              <option value="tsuioku">追憶</option>
+              <option value="ameNoHiNoNiwa">雨の日の庭</option>
               <option value="custom" disabled>選択したファイル</option>
               <option value="" selected>BGMなし</option>
             </select>
