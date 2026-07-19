@@ -2216,23 +2216,26 @@ async function generateScriptVoice(): Promise<boolean> {
 
 interface CaptionRepairRange { from: number; to: number }
 
-function changedCaptionRanges(before: readonly CaptionCue[], after: readonly CaptionCue[]): CaptionRepairRange[] {
-  if (before.length !== after.length || before.some((cue, index) => cue.text !== after[index]?.text)) {
-    throw new Error('読み以外の台本文字も変わっています。部分修正には表示文章が同じ音声を使用してください。');
-  }
-  const changed = before.flatMap((cue, index) => cue.spoken === after[index]!.spoken ? [] : [index]);
+function captionRangesForIndexes(cues: readonly CaptionCue[], indexes: readonly number[]): CaptionRepairRange[] {
   const sentenceEnd = (text: string): boolean => /[。．.!！?？…][」』）)】］\]”’]*\s*$/u.test(text);
   const ranges: CaptionRepairRange[] = [];
-  for (const index of changed) {
+  for (const index of [...new Set(indexes)].sort((left, right) => left - right)) {
     let from = index;
     let to = index;
-    while (from > 0 && !sentenceEnd(before[from - 1]!.text)) from -= 1;
-    while (to < before.length - 1 && !sentenceEnd(before[to]!.text)) to += 1;
+    while (from > 0 && !sentenceEnd(cues[from - 1]!.text)) from -= 1;
+    while (to < cues.length - 1 && !sentenceEnd(cues[to]!.text)) to += 1;
     const previous = ranges.at(-1);
     if (previous && from <= previous.to + 1) previous.to = Math.max(previous.to, to);
     else ranges.push({ from, to });
   }
   return ranges;
+}
+
+function changedCaptionRanges(before: readonly CaptionCue[], after: readonly CaptionCue[]): CaptionRepairRange[] {
+  if (before.length !== after.length || before.some((cue, index) => cue.text !== after[index]?.text)) {
+    throw new Error('読み以外の台本文字も変わっています。部分修正には表示文章が同じ音声を使用してください。');
+  }
+  return captionRangesForIndexes(before, before.flatMap((cue, index) => cue.spoken === after[index]!.spoken ? [] : [index]));
 }
 
 function base64Url(value: string): string {
@@ -2259,9 +2262,21 @@ async function repairPronunciationAudio(): Promise<void> {
     notify(errorMessage(error));
     return;
   }
+  let forced = false;
   if (!ranges.length) {
-    notify('元音声から読みが変更された文はありません。先にルビを反映してください。');
-    return;
+    try {
+      const words = Object.keys(pronunciationReadings());
+      const matchingIndexes = afterCues.flatMap((cue, index) => words.some(word => cue.text.includes(word)) ? [index] : []);
+      ranges = captionRangesForIndexes(afterCues, matchingIndexes);
+      forced = ranges.length > 0;
+    } catch (error) {
+      notify(errorMessage(error));
+      return;
+    }
+    if (!ranges.length) {
+      notify('読みの変更がありません。強制再生成する場合は「漢字の読み修正」へ対象語を入力してください。');
+      return;
+    }
   }
   if (ranges.length > 50) {
     notify('修正区間が50件を超えています。いくつかに分けて修正してください。');
@@ -2277,7 +2292,7 @@ async function repairPronunciationAudio(): Promise<void> {
   voiceGenerationController = controller;
   setVoiceGenerationState(true);
   elements.repairPronunciationAudio.textContent = `修正文を生成中 0/${ranges.length}`;
-  elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の修正文を生成します。`;
+  elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の修正文を${forced ? '同じルビで強制' : ''}生成します。`;
   try {
     const replacements: Blob[] = [];
     for (const [index, range] of ranges.entries()) {
@@ -2306,7 +2321,7 @@ async function repairPronunciationAudio(): Promise<void> {
     }
     await loadAudio(await response.blob(), `${state.audioName.replace(/\.wav$/iu, '')}-読み修正版.wav`, currentSource);
     elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の音声を修正しました。必要なら音声を保存してください。`;
-    notify(`${ranges.length}区間の読みを修正しました。`, true);
+    notify(`${ranges.length}区間の音声を${forced ? '同じルビで再生成' : '修正'}しました。`, true);
   } catch (error) {
     if (!controller.signal.aborted) notify(errorMessage(error));
   } finally {
