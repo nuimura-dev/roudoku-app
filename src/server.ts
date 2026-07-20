@@ -147,7 +147,7 @@ async function irodoriSpeech(req: IncomingMessage, res: ServerResponse): Promise
     const textChunks = splitIrodoriText(request.text, chunkSize);
     const attackFadeMs = irodoriAttackFadeMs(request.attackFadeMs);
     if (textChunks.length === 0) throw new Error('台本を入力してください');
-    audioDir = await mkdtemp(join(tmpdir(), 'vt-reader-irodori-'));
+    audioDir = await mkdtemp(join(tmpdir(), 'roudoku-app-irodori-'));
     const listPath = join(audioDir, 'chunks.txt');
     const outputPath = join(audioDir, 'speech.wav');
     const list: string[] = [];
@@ -240,7 +240,7 @@ async function irodoriVoiceUpload(req: IncomingMessage, res: ServerResponse): Pr
 
 async function fetchAozora(url: URL): Promise<Response> {
   const response = await fetch(url, {
-    headers: { 'user-agent': 'VT Reader/0.1 (Aozora Bunko importer)' },
+    headers: { 'user-agent': 'Roudoku-app/0.1 (Aozora Bunko importer)' },
     redirect: 'follow',
     signal: AbortSignal.timeout(15_000)
   });
@@ -274,7 +274,7 @@ async function importAozora(req: IncomingMessage, res: ServerResponse): Promise<
 }
 
 async function convert(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), 'vt-reader-'));
+  const dir = await mkdtemp(join(tmpdir(), 'roudoku-app-'));
   const input = join(dir, 'capture.webm');
   const output = join(dir, 'character.mp4');
   const clientAbort = new AbortController();
@@ -483,4 +483,4 @@ createServer(async (req, res) => {
       res.destroy(error instanceof Error ? error : new Error(errorMessage(error)));
     }
   }
-}).listen(port, () => console.log(`VT Reader: http://localhost:${port}`));
+}).listen(port, () => console.log(`Roudoku-app: http://localhost:${port}`));

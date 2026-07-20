@@ -1,4 +1,4 @@
-# VT Reader
+# Roudoku-app
 
 テキスト、キャラクター画像、音声からリップシンク付きのキャラクター動画を作るローカルWebツールです。
 
@@ -27,7 +27,7 @@ npm start
 
 ## VOICEVOX連携
 
-VOICEVOX Engineを起動してからVT Readerを立ち上げます。既定の接続先は `http://127.0.0.1:50021` です。別ホストの場合は次のように指定します。
+VOICEVOX Engineを起動してからRoudoku-appを立ち上げます。既定の接続先は `http://127.0.0.1:50021` です。別ホストの場合は次のように指定します。
 
 ```bash
 VOICEVOX_URL=http://localhost:50021 npm start
@@ -59,7 +59,7 @@ IRODORI_PRELOAD=true
 uv run --no-sync python -m irodori_openai_tts --host 127.0.0.1 --port 8088
 ```
 
-セットアップ後は、VT ReaderとIrodori-TTS Serverをプロジェクト直下のシェルでまとめて起動できます。
+セットアップ後は、Roudoku-appとIrodori-TTS Serverをプロジェクト直下のシェルでまとめて起動できます。
 
 ```bash
 ./start-with-irodori.sh
@@ -84,7 +84,7 @@ npm run start:irodori
 統合起動ではVoiceDesignモデルと、VoiceDesignで生成した落ち着いた朗読用の`assets/voices/calm_cute_female.wav`を既定で使用します。別のモデルや音声を使う場合は、`IRODORI_HF_CHECKPOINT`、`IRODORI_VOICES_DIR`、`IRODORI_DEFAULT_VOICE`を環境変数で上書きできます。
 初回のモデル取得・読込は最大15分待機します。必要なら`IRODORI_STARTUP_TIMEOUT=1200 ./start-with-irodori.sh`のように秒数を変更できます。
 
-別の接続先を使用する場合は、VT Reader起動時に指定します。
+別の接続先を使用する場合は、Roudoku-app起動時に指定します。
 
 ```bash
 IRODORI_TTS_URL=http://127.0.0.1:8088 npm start

@@ -19,11 +19,11 @@ test('青空文庫のルビをVOICEVOX用の読みに変換する', () => {
 });
 
 test('英字は音声用の読みに変換し、字幕では元の表記を保つ', () => {
-  const spoken = 'ブイティー リーダーとエムピーフォー。';
-  assert.equal(plainText('VT ReaderとMP4。'), spoken);
-  assert.equal(displayText('VT ReaderとMP4。'), 'VT ReaderとMP4。');
-  const cue = captionCues('VT ReaderとMP4。')[0]!;
-  assert.equal(cue.text, 'VT ReaderとMP4。');
+  const spoken = 'ブイアール リーダーとエムピーフォー。';
+  assert.equal(plainText('VR ReaderとMP4。'), spoken);
+  assert.equal(displayText('VR ReaderとMP4。'), 'VR ReaderとMP4。');
+  const cue = captionCues('VR ReaderとMP4。')[0]!;
+  assert.equal(cue.text, 'VR ReaderとMP4。');
   assert.equal(cue.weight, [...spoken].length + 11.4);
 });
 

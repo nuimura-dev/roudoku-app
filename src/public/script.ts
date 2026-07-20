@@ -20,8 +20,8 @@ const latinDigitReadings: Record<string, string> = {
 const commonLatinReadings: Record<string, string> = {
   ai: 'エーアイ', cpu: 'シーピーユー', gpu: 'ジーピーユー', http: 'エイチティーティーピー',
   https: 'エイチティーティーピーエス', mp3: 'エムピースリー', mp4: 'エムピーフォー',
-  tts: 'ティーティーエス', url: 'ユーアールエル', vr: 'ブイアール', vt: 'ブイティー',
-  reader: 'リーダー', vtreader: 'ブイティーリーダー', hello: 'ハロー', world: 'ワールド', english: 'イングリッシュ'
+  tts: 'ティーティーエス', url: 'ユーアールエル', vr: 'ブイアール',
+  reader: 'リーダー', hello: 'ハロー', world: 'ワールド', english: 'イングリッシュ'
 };
 
 function latinReading(token: string): string {
