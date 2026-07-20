@@ -38,6 +38,20 @@
         <button class="export" id="exportButton">MP4を書き出す <span>↗</span></button>
         <button class="cancel-action" id="cancelExport" type="button" hidden>書き出しを中止</button>
       </div>
+      <section class="script-review" id="scriptReview">
+        <div class="script-review-head">
+          <div><strong>台本チェック</strong><small id="reviewPosition">プレビュー位置と連動します</small></div>
+          <div><span id="reviewMarkerCount">要確認 0件</span><button id="toggleScriptReview" type="button" aria-expanded="true">閉じる</button></div>
+        </div>
+        <div class="script-review-body" id="scriptReviewBody">
+          <div class="review-context" id="reviewContext" aria-live="polite"></div>
+          <div class="review-check-controls">
+            <input id="reviewNote" type="text" maxlength="160" placeholder="メモ（例：読み間違い、字幕が遅い）">
+            <button id="markReviewIssue" type="button" disabled>要確認に追加（M）</button>
+          </div>
+          <div class="review-markers" id="reviewMarkers"></div>
+        </div>
+      </section>
     </section>
 
     <aside class="editor">
@@ -196,11 +210,7 @@
               <option value="musmus105a">卒業（音楽室ver.）</option>
               <option value="musmus105b">卒業（体育館ver.）</option>
               <option value="seiya">聖夜</option>
-              <option value="jinroKomoriuta">人狼の為の子守唄</option>
               <option value="tsurugiNoAruji">剣の主</option>
-              <option value="kamikakushiNoShinso">神隠しの真相</option>
-              <option value="tsuioku">追憶</option>
-              <option value="ameNoHiNoNiwa">雨の日の庭</option>
               <option value="custom" disabled>選択したファイル</option>
               <option value="" selected>BGMなし</option>
             </select>

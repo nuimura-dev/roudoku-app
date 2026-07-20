@@ -20,6 +20,13 @@ interface HairPart {
   eraseOriginal: boolean;
   motionScale: number;
 }
+interface ReviewMarker {
+  id: string;
+  cueIndex: number;
+  cueText: string;
+  elapsed: number;
+  note: string;
+}
 interface PlaybackSession {
   cancelled: boolean;
   duration: number;
@@ -73,6 +80,8 @@ interface AppState {
   session: PlaybackSession | null;
   captionCues: CaptionCue[];
   captionTimes: number[] | null;
+  reviewMarkers: ReviewMarker[];
+  reviewCueIndex: number;
 }
 
 function required<T extends Element>(selector: string): T {
@@ -184,7 +193,16 @@ const elements = {
   captionSize: required<HTMLInputElement>('#captionSize'),
   captionX: required<HTMLInputElement>('#captionX'),
   captionY: required<HTMLInputElement>('#captionY'),
-  expressionChips: required<HTMLElement>('#expressionChips')
+  expressionChips: required<HTMLElement>('#expressionChips'),
+  scriptReview: required<HTMLElement>('#scriptReview'),
+  scriptReviewBody: required<HTMLElement>('#scriptReviewBody'),
+  toggleScriptReview: required<HTMLButtonElement>('#toggleScriptReview'),
+  reviewPosition: required<HTMLElement>('#reviewPosition'),
+  reviewMarkerCount: required<HTMLElement>('#reviewMarkerCount'),
+  reviewContext: required<HTMLElement>('#reviewContext'),
+  reviewNote: required<HTMLInputElement>('#reviewNote'),
+  markReviewIssue: required<HTMLButtonElement>('#markReviewIssue'),
+  reviewMarkers: required<HTMLElement>('#reviewMarkers')
 };
 const canvasContext = elements.canvas.getContext('2d');
 if (!canvasContext) throw new Error('Canvas 2D context is unavailable');
@@ -220,7 +238,8 @@ const state: AppState = {
   },
   activeLayer: 'character', audioBuffer: null, audioElement: null, audioMediaNode: null, audioUrl: null, audioDuration: 0, audioBlob: null, audioName: '', audioScriptSource: null, audioCaptionTimes: null, bgmBuffer: null, bgmName: '', ambientBuffer: null, ambientName: '', playing: false, exporting: false,
   progress: 0, overallProgress: 0, playbackElapsed: 0, playbackPhase: 'idle', mouth: 0, currentExpression: 'neutral', previousExpression: 'neutral',
-  expressionTransitionStartedAt: Number.NEGATIVE_INFINITY, currentViseme: 'closed', session: null, captionCues: [], captionTimes: null
+  expressionTransitionStartedAt: Number.NEGATIVE_INFINITY, currentViseme: 'closed', session: null, captionCues: [], captionTimes: null,
+  reviewMarkers: [], reviewCueIndex: -2
 };
 let voiceGenerationController: AbortController | null = null;
 let pronunciationPreviewController: AbortController | null = null;
@@ -261,11 +280,7 @@ const defaultBgmAssets: Record<string, { url: string; label: string }> = {
   musmus105a: { url: '/assets/bgm/MusMus-BGM-105a.mp3', label: '卒業（音楽室ver.）' },
   musmus105b: { url: '/assets/bgm/MusMus-BGM-105b.mp3', label: '卒業（体育館ver.）' },
   seiya: { url: '/assets/bgm/seiya.mp3', label: '聖夜' },
-  jinroKomoriuta: { url: '/assets/bgm/jinro-no-tame-no-komoriuta.mp3', label: '人狼の為の子守唄' },
-  tsurugiNoAruji: { url: '/assets/bgm/tsurugi-no-aruji.mp3', label: '剣の主' },
-  kamikakushiNoShinso: { url: '/assets/bgm/kamikakushi-no-shinso.mp3', label: '神隠しの真相' },
-  tsuioku: { url: '/assets/bgm/tsuioku.mp3', label: '追憶' },
-  ameNoHiNoNiwa: { url: '/assets/bgm/ame-no-hi-no-niwa.mp3', label: '雨の日の庭' }
+  tsurugiNoAruji: { url: '/assets/bgm/tsurugi-no-aruji.mp3', label: '剣の主' }
 };
 const defaultAmbientAssets: Record<string, { url: string; label: string }> = {
   wind: { url: '/assets/sounds/VSQSE_0613_wind_04.mp3', label: '風' },
@@ -1030,6 +1045,137 @@ function activeCaptionForPlayback(): ActiveCaption | null {
   return null;
 }
 
+function cueNarrationStart(index: number): number {
+  const times = state.captionTimes;
+  if (times && times.length === state.captionCues.length + 1) return times[index] ?? 0;
+  const totalWeight = state.captionCues.reduce((sum, cue) => sum + cue.weight, 0);
+  if (totalWeight <= 0) return 0;
+  const before = state.captionCues.slice(0, index).reduce((sum, cue) => sum + cue.weight, 0);
+  return narrationDuration() * before / totalWeight;
+}
+
+function cueOverallStart(index: number): number {
+  return openingCardDuration() + cueNarrationStart(Math.max(0, Math.min(state.captionCues.length - 1, index)));
+}
+
+function reviewCaptionForPlayback(): ActiveCaption | null {
+  const opening = state.session?.openingDuration ?? openingCardDuration();
+  const narration = state.session?.narrationDuration ?? narrationDuration();
+  const narrationElapsed = state.playbackElapsed - opening;
+  if (narrationElapsed < 0 || narrationElapsed >= narration) return null;
+  return activeCaptionForPlayback();
+}
+
+function seekToReviewCue(index: number): void {
+  if (index < 0 || index >= state.captionCues.length || state.exporting) return;
+  if (state.playing) stopPlayback();
+  updatePlaybackPosition(cueOverallStart(index), duration());
+  state.previousExpression = state.currentExpression;
+  state.expressionTransitionStartedAt = Number.NEGATIVE_INFINITY;
+  state.mouth = 0;
+  state.currentViseme = 'closed';
+  state.reviewCueIndex = -2;
+  draw();
+}
+
+function seekToReviewElapsed(elapsed: number): void {
+  if (state.exporting) return;
+  if (state.playing) stopPlayback();
+  updatePlaybackPosition(Math.max(0, Math.min(duration(), elapsed)), duration());
+  state.previousExpression = state.currentExpression;
+  state.expressionTransitionStartedAt = Number.NEGATIVE_INFINITY;
+  state.mouth = 0;
+  state.currentViseme = 'closed';
+  state.reviewCueIndex = -2;
+  draw();
+}
+
+function addCurrentReviewMarker(): void {
+  const active = reviewCaptionForPlayback();
+  if (!active) {
+    notify('本文の再生位置で「要確認」を追加してください。');
+    return;
+  }
+  const note = elements.reviewNote.value.trim();
+  state.reviewMarkers.push({
+    id: globalThis.crypto?.randomUUID?.() ?? `review-${Date.now()}-${state.reviewMarkers.length}`,
+    cueIndex: active.index,
+    cueText: state.captionCues[active.index]?.text ?? active.text,
+    elapsed: state.playbackElapsed,
+    note
+  });
+  elements.reviewNote.value = '';
+  renderReviewMarkers();
+  notify(`要確認へ追加しました（${formatTime(state.playbackElapsed)}）。`, true);
+}
+
+function renderReviewMarkers(): void {
+  elements.reviewMarkerCount.textContent = `要確認 ${state.reviewMarkers.length}件`;
+  if (!state.reviewMarkers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'review-empty';
+    empty.textContent = 'チェックした箇所はここに残ります。';
+    elements.reviewMarkers.replaceChildren(empty);
+    return;
+  }
+  elements.reviewMarkers.replaceChildren(...state.reviewMarkers.map(marker => {
+    const row = document.createElement('div');
+    row.className = 'review-marker';
+    const jump = document.createElement('button');
+    jump.type = 'button';
+    jump.dataset.reviewMarkerId = marker.id;
+    jump.title = marker.note || marker.cueText;
+    const time = document.createElement('time');
+    time.textContent = formatTime(marker.elapsed);
+    const label = document.createElement('span');
+    label.textContent = marker.note ? `${marker.note} — ${marker.cueText}` : marker.cueText;
+    jump.append(time, label);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'remove-review-marker';
+    remove.dataset.removeReviewMarker = marker.id;
+    remove.setAttribute('aria-label', 'チェックを削除');
+    remove.textContent = '×';
+    row.append(jump, remove);
+    return row;
+  }));
+}
+
+function renderScriptReview(force = false): void {
+  const active = reviewCaptionForPlayback();
+  const activeIndex = active?.index ?? -1;
+  elements.markReviewIssue.disabled = activeIndex < 0;
+  elements.reviewPosition.textContent = active
+    ? `${formatTime(state.playbackElapsed)} · ${activeIndex + 1} / ${state.captionCues.length}`
+    : state.playbackElapsed < openingCardDuration() ? '冒頭カード' : '本文外';
+  if (!force && state.reviewCueIndex === activeIndex) return;
+  state.reviewCueIndex = activeIndex;
+  if (!state.captionCues.length) {
+    const empty = document.createElement('div');
+    empty.className = 'review-empty';
+    empty.textContent = '台本を入力すると、再生中の文章がここに表示されます。';
+    elements.reviewContext.replaceChildren(empty);
+    return;
+  }
+  const center = activeIndex >= 0 ? activeIndex : 0;
+  const first = Math.max(0, Math.min(state.captionCues.length - 3, center - 1));
+  const rows: HTMLButtonElement[] = [];
+  for (let index = first; index < Math.min(state.captionCues.length, first + 3); index += 1) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `review-cue${index === activeIndex ? ' current' : ''}`;
+    row.dataset.reviewCueIndex = String(index);
+    const time = document.createElement('time');
+    time.textContent = formatTime(cueOverallStart(index));
+    const text = document.createElement('span');
+    text.textContent = state.captionCues[index]!.text;
+    row.append(time, text);
+    rows.push(row);
+  }
+  elements.reviewContext.replaceChildren(...rows);
+  elements.reviewContext.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
+}
+
 function drawReadingCaption(time: number): void {
   if (state.playbackPhase !== 'narration' || !elements.showCaptions.checked) return;
   const caption = activeCaptionForPlayback();
@@ -1190,6 +1336,7 @@ function draw(time = performance.now() / 1000): void {
   elements.timeline.setAttribute('aria-valuenow', String(Math.round(state.overallProgress * 100)));
   elements.timeline.setAttribute('aria-valuetext', `${formatTime(state.playbackElapsed)} / ${formatTime(totalDuration)}`);
   elements.timecode.textContent = `${formatTime(state.playbackElapsed)} / ${formatTime(totalDuration)}`;
+  renderScriptReview();
 }
 
 function updateScript(): void {
@@ -1206,6 +1353,8 @@ function updateScript(): void {
     return marker;
   }));
   updateEnglishRubyPanel(source);
+  state.reviewCueIndex = -2;
+  renderScriptReview(true);
   if (!state.playing) draw();
 }
 
@@ -1847,6 +1996,8 @@ interface SavedProject {
   layerOffsets: Record<SceneLayer, LayerOffset>;
   activeLayer: SceneLayer;
   externalFiles: string[];
+  reviewMarkers?: ReviewMarker[];
+  reviewPanelOpen?: boolean;
 }
 
 function projectControl(id: string): HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null {
@@ -1891,25 +2042,105 @@ function currentSavedProject(): SavedProject {
       foreground: { ...state.layerOffsets.foreground }
     },
     activeLayer: state.activeLayer,
-    externalFiles
+    externalFiles,
+    reviewMarkers: state.reviewMarkers.map(marker => ({ ...marker })),
+    reviewPanelOpen: !elements.scriptReviewBody.hidden
   };
 }
 
-function saveProject(): void {
+type DirectSaveResult = 'saved' | 'cancelled' | 'unsupported';
+
+interface DirectWritableFile {
+  write(data: Uint8Array<ArrayBuffer>): Promise<void>;
+  close(): Promise<void>;
+  abort(reason?: unknown): Promise<void>;
+}
+
+interface DirectSaveHandle {
+  createWritable(): Promise<DirectWritableFile>;
+}
+
+interface DirectSaveWindow extends Window {
+  showSaveFilePicker?: (options: {
+    suggestedName: string;
+    types: Array<{ description: string; accept: Record<string, string[]> }>;
+  }) => Promise<DirectSaveHandle>;
+}
+
+async function saveBlobDirectly(blob: Blob, filename: string, bundled: boolean): Promise<DirectSaveResult> {
+  const picker = (window as DirectSaveWindow).showSaveFilePicker;
+  if (!picker) return 'unsupported';
+  let writable: DirectWritableFile | null = null;
+  try {
+    const handle = await picker.call(window, {
+      suggestedName: filename,
+      types: [{
+        description: bundled ? '朗読娘プロジェクト' : '朗読娘プロジェクト設定',
+        accept: { [bundled ? 'application/x-roudoku-project' : 'application/json']: [bundled ? '.roudoku' : '.json'] }
+      }]
+    });
+    writable = await handle.createWritable();
+    const reader = blob.stream().getReader();
+    let written = 0;
+    let previousPercent = -1;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await writable.write(value);
+      written += value.byteLength;
+      const percent = blob.size > 0 ? Math.min(100, Math.floor(written / blob.size * 100)) : 100;
+      if (percent !== previousPercent) {
+        previousPercent = percent;
+        elements.statusText.textContent = `プロジェクト保存中 ${percent}% · ${formatFileSize(written)} / ${formatFileSize(blob.size)}`;
+      }
+    }
+    await writable.close();
+    writable = null;
+    return 'saved';
+  } catch (error) {
+    if (writable) await writable.abort(error).catch(() => undefined);
+    if (error instanceof DOMException && error.name === 'AbortError') return 'cancelled';
+    throw error;
+  }
+}
+
+async function saveProject(): Promise<void> {
+  if (elements.saveProject.disabled) return;
+  elements.saveProject.disabled = true;
   const project = currentSavedProject();
   const bundled = Boolean(state.audioBlob);
   const blob = state.audioBlob
     ? createProjectBundle(project, { blob: state.audioBlob, name: state.audioName })
     : new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = safeProjectFilename(elements.workTitle.value, bundled);
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), bundled ? 60_000 : 3000);
-  notify(bundled
-    ? `プロジェクトと朗読音声（${formatFileSize(state.audioBlob?.size ?? 0)}）を保存しました。`
-    : 'プロジェクト設定を保存しました。音声を読み込むか生成すると、次回は音声も同梱されます。', true);
+  const filename = safeProjectFilename(elements.workTitle.value, bundled);
+  try {
+    const directResult = await saveBlobDirectly(blob, filename, bundled);
+    if (directResult === 'cancelled') {
+      elements.statusText.textContent = 'プロジェクト保存をキャンセル';
+      notify('プロジェクト保存をキャンセルしました。', true);
+      return;
+    }
+    if (directResult === 'unsupported') {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      // 従来方式しか使えないブラウザでは、大容量保存の確定までURLを保持する。
+      setTimeout(() => URL.revokeObjectURL(url), bundled ? 6 * 60 * 60_000 : 3000);
+      elements.statusText.textContent = 'ブラウザのダウンロードを開始しました';
+    } else {
+      elements.statusText.textContent = `プロジェクト保存完了 · ${formatFileSize(blob.size)}`;
+    }
+    notify(bundled
+      ? `プロジェクトと朗読音声（${formatFileSize(state.audioBlob?.size ?? 0)}）を「${filename}」へ保存しました。`
+      : `プロジェクト設定を「${filename}」へ保存しました。音声を読み込むか生成すると、次回は音声も同梱されます。`, true);
+  } catch (error) {
+    elements.statusText.textContent = 'プロジェクト保存失敗';
+    notify(`プロジェクトを保存できませんでした: ${errorMessage(error)}`);
+  } finally {
+    elements.saveProject.disabled = false;
+  }
 }
 
 function validOffset(value: unknown, fallback: LayerOffset): LayerOffset {
@@ -1945,6 +2176,24 @@ async function loadProject(file: File): Promise<void> {
   state.layerOffsets.foreground = validOffset(offsets?.foreground, defaultLayerOffsets.foreground);
   const activeLayer = project.activeLayer;
   setActiveLayer(activeLayer === 'background' || activeLayer === 'foreground' ? activeLayer : 'character');
+  state.reviewMarkers = Array.isArray(project.reviewMarkers)
+    ? project.reviewMarkers.flatMap((value, index) => {
+      if (!value || typeof value !== 'object') return [];
+      const marker = value as Partial<ReviewMarker>;
+      if (typeof marker.cueText !== 'string' || !Number.isFinite(Number(marker.cueIndex))) return [];
+      return [{
+        id: typeof marker.id === 'string' ? marker.id : `loaded-${index}`,
+        cueIndex: Math.max(0, Math.floor(Number(marker.cueIndex))),
+        cueText: marker.cueText,
+        elapsed: Number.isFinite(Number(marker.elapsed)) ? Math.max(0, Number(marker.elapsed)) : 0,
+        note: typeof marker.note === 'string' ? marker.note.slice(0, 160) : ''
+      }];
+    })
+    : [];
+  elements.scriptReviewBody.hidden = project.reviewPanelOpen === false;
+  elements.toggleScriptReview.setAttribute('aria-expanded', String(!elements.scriptReviewBody.hidden));
+  elements.toggleScriptReview.textContent = elements.scriptReviewBody.hidden ? '開く' : '閉じる';
+  renderReviewMarkers();
 
   // 先に読み込まれた音声は維持し、プロジェクト側の台本・表示設定だけを復元する。
   const preservedAudio = !bundle && Boolean(state.audioBuffer || state.audioElement);
@@ -1987,7 +2236,7 @@ document.querySelectorAll<HTMLButtonElement>('.tabs button').forEach(button => b
   document.querySelectorAll<HTMLElement>('.tab').forEach(tab => tab.classList.toggle('active', tab.id === `tab-${button.dataset.tab}`));
 }));
 
-elements.saveProject.addEventListener('click', saveProject);
+elements.saveProject.addEventListener('click', () => { void saveProject(); });
 elements.openProject.addEventListener('change', async () => {
   const file = elements.openProject.files?.[0];
   if (!file) return;
@@ -2670,6 +2919,33 @@ elements.playButton.addEventListener('click', () => { void beginPlayback(); });
 elements.rewind.addEventListener('click', () => stopPlayback(true));
 elements.exportButton.addEventListener('click', () => { void exportVideo(); });
 elements.cancelExport.addEventListener('click', cancelExport);
+elements.toggleScriptReview.addEventListener('click', () => {
+  elements.scriptReviewBody.hidden = !elements.scriptReviewBody.hidden;
+  const expanded = !elements.scriptReviewBody.hidden;
+  elements.toggleScriptReview.setAttribute('aria-expanded', String(expanded));
+  elements.toggleScriptReview.textContent = expanded ? '閉じる' : '開く';
+});
+elements.markReviewIssue.addEventListener('click', addCurrentReviewMarker);
+elements.reviewNote.addEventListener('keydown', event => {
+  if (event.key !== 'Enter') return;
+  addCurrentReviewMarker();
+  event.preventDefault();
+});
+elements.reviewContext.addEventListener('click', event => {
+  const button = (event.target as Element).closest<HTMLButtonElement>('[data-review-cue-index]');
+  if (button) seekToReviewCue(Number(button.dataset.reviewCueIndex));
+});
+elements.reviewMarkers.addEventListener('click', event => {
+  const remove = (event.target as Element).closest<HTMLButtonElement>('[data-remove-review-marker]');
+  if (remove) {
+    state.reviewMarkers = state.reviewMarkers.filter(marker => marker.id !== remove.dataset.removeReviewMarker);
+    renderReviewMarkers();
+    return;
+  }
+  const jump = (event.target as Element).closest<HTMLButtonElement>('[data-review-marker-id]');
+  const marker = state.reviewMarkers.find(item => item.id === jump?.dataset.reviewMarkerId);
+  if (marker) seekToReviewElapsed(marker.elapsed);
+});
 
 function seekPreview(clientX: number): void {
   const bounds = elements.timeline.getBoundingClientRect();
@@ -2734,7 +3010,13 @@ document.addEventListener('keydown', event => {
     elements.stageWrap.classList.remove('stage-expanded');
     updateExpandButton();
   }
+  const target = event.target;
+  const editing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
+  if (!editing && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === 'm') {
+    addCurrentReviewMarker();
+    event.preventDefault();
+  }
 });
 window.addEventListener('beforeunload', () => stopPlayback());
 
-setActiveLayer('character'); updateTtsEngine(); updateScript(); renderPronunciationPreviewList(); draw(); void loadDefaultCharacter(); void loadBgmPreset(elements.bgmPreset.value, false); void loadAmbientPreset(elements.ambientPreset.value, false);
+setActiveLayer('character'); updateTtsEngine(); updateScript(); renderPronunciationPreviewList(); renderReviewMarkers(); draw(); void loadDefaultCharacter(); void loadBgmPreset(elements.bgmPreset.value, false); void loadAmbientPreset(elements.ambientPreset.value, false);
