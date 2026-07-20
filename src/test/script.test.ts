@@ -32,6 +32,7 @@ test('英語の固有名詞はルビで自然な読みを指定できる', () =>
   assert.equal(displayText('｜London《ロンドン》へ行く。'), 'Londonへ行く。');
   const cue = captionCues('｜London《ロンドン》へ行く。')[0]!;
   assert.equal(cue.text, 'Londonへ行く。');
+  assert.equal(cue.rubyText, '｜London《ロンドン》へ行く。');
   assert.equal(cue.spoken, 'ロンドンへ行く。');
   assert.equal(cue.weight, [...'ロンドンへ行く。'].length + 11.4);
 });

@@ -2,7 +2,7 @@ export const EXPRESSIONS = ['neutral', 'happy', 'sad', 'angry', 'surprised'] as 
 
 export type Expression = typeof EXPRESSIONS[number];
 export interface ScriptSegment { expression: Expression; text: string }
-export interface CaptionCue { text: string; spoken: string; weight: number }
+export interface CaptionCue { text: string; rubyText: string; spoken: string; weight: number }
 export interface ActiveCaption { text: string; progress: number; index: number }
 export interface EnglishRubyCandidate { word: string; reading: string; count: number }
 
@@ -118,24 +118,28 @@ export function captionCues(source: unknown): CaptionCue[] {
   const rawSource = parseScript(source).map(item => item.text).filter(Boolean).join(' ');
   const units = [...rawSource.matchAll(/｜([^《\n]+)《([^》\n]+)》|([\p{Script=Han}々〆ヵヶ]+)《([^》\n]+)》|./gsu)].map(match => ({
     display: match[1] ?? match[3] ?? match[0],
-    spoken: match[2] ?? match[4] ?? match[0]
+    spoken: match[2] ?? match[4] ?? match[0],
+    rubyText: match[0]
   }));
   const cues: CaptionCue[] = [];
   const strong = new Set(['。', '．', '.', '!', '！', '?', '？', '…']);
   const comma = new Set(['、', '，', ',']);
   const closingMarks = new Set(['」', '』', '）', ')', '】', '］', ']', '”', '’']);
   let current = '';
+  let rubyText = '';
   let spoken = '';
   let visibleChars = 0;
   const push = (): void => {
     const text = current.replace(/\s+/gu, ' ').trim();
+    const annotatedText = rubyText.replace(/\s+/gu, ' ').trim();
     const spokenText = spoken;
     current = '';
+    rubyText = '';
     spoken = '';
     visibleChars = 0;
     if (text) {
       const spokenValue = plainText(spokenText);
-      cues.push({ text, spoken: spokenValue, weight: Math.max(1, [...spokenValue].length + captionPauseWeight(spokenText)) });
+      cues.push({ text, rubyText: annotatedText, spoken: spokenValue, weight: Math.max(1, [...spokenValue].length + captionPauseWeight(spokenText)) });
     } else {
       const blankPause = captionPauseWeight(spokenText);
       const previous = cues.at(-1);
@@ -145,6 +149,7 @@ export function captionCues(source: unknown): CaptionCue[] {
 
   units.forEach((unit, index) => {
     current += unit.display;
+    rubyText += unit.rubyText;
     spoken += unit.spoken;
     if (!/\s/u.test(unit.display)) visibleChars += [...unit.display].length;
     const character = [...unit.display].at(-1) ?? '';

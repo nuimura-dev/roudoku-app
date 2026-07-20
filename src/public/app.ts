@@ -35,6 +35,7 @@ interface PlaybackSession {
   narrationDuration: number;
   endingDuration: number;
   source?: AudioBufferSourceNode;
+  narrationGain?: GainNode;
   mediaStartTimer?: number;
   bgmSource?: AudioBufferSourceNode;
   bgmGain?: GainNode;
@@ -247,6 +248,9 @@ let pronunciationPreviewAudio: HTMLAudioElement | null = null;
 let pronunciationPreviewUrl: string | null = null;
 let pronunciationPreviewButton: HTMLButtonElement | null = null;
 let repairPreviewClips: Array<{ label: string; blob: Blob }> = [];
+const reviewPreviewClips = new Map<string, { blob: Blob; spoken: string }>();
+let reviewBusyMarkerId: string | null = null;
+let reviewBusyAction: 'generate' | 'apply' | null = null;
 let exportController: AbortController | null = null;
 let exportCancelled = false;
 let combinedWorkflowRunning = false;
@@ -688,7 +692,67 @@ function captionLines(text: string, maxWidth: number): string[] {
   return lines;
 }
 
-function drawTwistReadingCaption(time: number, caption: { text: string; progress: number }): void {
+interface RubyCaptionUnit { base: string; reading: string; width: number; baseWidth: number }
+interface RubyCaptionLine { units: RubyCaptionUnit[]; width: number; plain: string }
+
+function rubyCaptionLines(cue: Pick<CaptionCue, 'text' | 'rubyText'>, maxWidth: number, fontSize: number): RubyCaptionLine[] {
+  const source = cue.rubyText || cue.text;
+  const rawUnits: Array<{ base: string; reading: string }> = [];
+  const pattern = /｜([^《\n]+)《([^》\n]+)》|([\p{Script=Han}々〆ヵヶ]+)《([^》\n]+)》|./gsu;
+  for (const match of source.matchAll(pattern)) {
+    const base = match[1] ?? match[3];
+    if (base !== undefined) rawUnits.push({ base, reading: match[2] ?? match[4] ?? '' });
+    else for (const character of [...match[0]]) rawUnits.push({ base: character, reading: '' });
+  }
+  const baseFont = ctx.font;
+  const rubySize = Math.max(10, fontSize * .46);
+  const units = rawUnits.map(unit => {
+    ctx.font = baseFont;
+    const baseWidth = ctx.measureText(unit.base).width;
+    ctx.font = `500 ${rubySize}px "Yu Mincho", YuMincho, "Noto Serif JP", serif`;
+    const readingWidth = unit.reading ? ctx.measureText(unit.reading).width : 0;
+    return { ...unit, baseWidth, width: Math.max(baseWidth, readingWidth) };
+  });
+  ctx.font = baseFont;
+  const lines: RubyCaptionLine[] = [];
+  let current: RubyCaptionUnit[] = [];
+  let width = 0;
+  const push = (): void => {
+    while (current[0]?.base.trim() === '') { width -= current[0].width; current.shift(); }
+    while (current.at(-1)?.base.trim() === '') width -= current.pop()!.width;
+    if (current.length) lines.push({ units: current, width, plain: current.map(unit => unit.base).join('') });
+    current = []; width = 0;
+  };
+  for (const unit of units) {
+    if (current.length && width + unit.width > maxWidth) push();
+    current.push(unit); width += unit.width;
+  }
+  push();
+  return lines;
+}
+
+function drawRubyCaptionLine(line: RubyCaptionLine, left: number, baseY: number, fontSize: number, baseColor: string, rubyColor: string): void {
+  const baseFont = ctx.font;
+  const rubySize = Math.max(10, fontSize * .46);
+  let cursor = left;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  for (const unit of line.units) {
+    ctx.font = baseFont;
+    ctx.fillStyle = baseColor;
+    ctx.fillText(unit.base, cursor + (unit.width - unit.baseWidth) / 2, baseY);
+    if (unit.reading) {
+      ctx.font = `500 ${rubySize}px "Yu Mincho", YuMincho, "Noto Serif JP", serif`;
+      ctx.fillStyle = rubyColor;
+      const readingWidth = ctx.measureText(unit.reading).width;
+      ctx.fillText(unit.reading, cursor + (unit.width - readingWidth) / 2, baseY - fontSize * .66);
+    }
+    cursor += unit.width;
+  }
+  ctx.font = baseFont;
+}
+
+function drawTwistReadingCaption(time: number, caption: ActiveCaption): void {
   ctx.save();
   const fontSize = Number(elements.captionSize.value);
   ctx.font = `700 ${fontSize}px "Yu Mincho", YuMincho, "Hiragino Mincho ProN", "Noto Serif JP", serif`;
@@ -697,9 +761,9 @@ function drawTwistReadingCaption(time: number, caption: { text: string; progress
   const leftX = elements.canvas.width * Number(elements.captionX.value) / 100;
   const rightPadding = elements.canvas.width * .04;
   const availableWidth = Math.max(fontSize * 1.2, elements.canvas.width - leftX - rightPadding);
-  const lines = captionLines(caption.text, availableWidth);
-  const lineHeight = fontSize * 1.34;
-  const widest = Math.max(...lines.map(line => ctx.measureText(line).width));
+  const lines = rubyCaptionLines(state.captionCues[caption.index]!, availableWidth, fontSize);
+  const lineHeight = fontSize * 1.68;
+  const widest = Math.max(...lines.map(line => line.width));
   const panelHeight = lines.length * lineHeight + fontSize * .7;
   const requestedY = elements.canvas.height * Number(elements.captionY.value) / 100;
   const centerY = Math.max(panelHeight / 2 + 8, Math.min(elements.canvas.height - panelHeight / 2 - 8, requestedY))
@@ -722,18 +786,28 @@ function drawTwistReadingCaption(time: number, caption: { text: string; progress
   ctx.fillRect(panelX, centerY - panelHeight / 2, panelWidth, panelHeight);
   ctx.restore();
   const glyphs: Array<{ character: string; x: number; y: number }> = [];
+  const readings: Array<{ text: string; x: number; y: number }> = [];
   lines.forEach((line, lineIndex) => {
-    const characters = [...line];
-    const widths = characters.map(character => ctx.measureText(character).width);
     let cursor = 0;
-    characters.forEach((character, index) => {
-      const width = widths[index]!;
-      glyphs.push({
-        character,
-        x: cursor + width / 2,
-        y: (lineIndex - (lines.length - 1) / 2) * lineHeight
+    line.units.forEach(unit => {
+      const characters = [...unit.base];
+      const widths = characters.map(character => ctx.measureText(character).width);
+      let baseCursor = cursor + (unit.width - unit.baseWidth) / 2;
+      characters.forEach((character, index) => {
+        const width = widths[index]!;
+        glyphs.push({
+          character,
+          x: baseCursor + width / 2,
+          y: (lineIndex - (lines.length - 1) / 2) * lineHeight
+        });
+        baseCursor += width;
       });
-      cursor += width;
+      if (unit.reading) readings.push({
+        text: unit.reading,
+        x: cursor + unit.width / 2,
+        y: (lineIndex - (lines.length - 1) / 2) * lineHeight - fontSize * .66
+      });
+      cursor += unit.width;
     });
   });
 
@@ -768,13 +842,21 @@ function drawTwistReadingCaption(time: number, caption: { text: string; progress
     ctx.fillText(glyph.character, 0, 0);
     ctx.restore();
   });
+  // ルビは本文のひねりを邪魔しないよう、同じフェード量で小さく追従させる。
+  ctx.font = `500 ${Math.max(10, fontSize * .46)}px "Yu Mincho", YuMincho, "Noto Serif JP", serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#202010';
+  ctx.globalAlpha = panelOpacity;
+  ctx.filter = `blur(${(1 - panelOpacity) * 1.2}px)`;
+  readings.forEach(reading => ctx.fillText(reading.text, leftX + reading.x, centerY + reading.y));
   ctx.restore();
 }
 
 function drawFixedReadingPanel(caption: ActiveCaption): void {
   ctx.save();
   const fontSize = Number(elements.captionSize.value);
-  const lineHeight = fontSize * 1.52;
+  const lineHeight = fontSize * 1.82;
   const panelX = elements.canvas.width * Number(elements.captionX.value) / 100;
   const panelWidth = Math.min(elements.canvas.width * .43, elements.canvas.width - panelX - elements.canvas.width * .035);
   const panelHeight = elements.canvas.height * .68;
@@ -795,17 +877,17 @@ function drawFixedReadingPanel(caption: ActiveCaption): void {
 
   ctx.font = `600 ${fontSize}px "Yu Mincho", YuMincho, "Hiragino Mincho ProN", "Noto Serif JP", serif`;
   ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
+  ctx.textBaseline = 'middle';
 
   const previousLines = caption.index > 0 && caption.progress < .22
-    ? captionLines(state.captionCues[caption.index - 1]!.text, textWidth)
+    ? rubyCaptionLines(state.captionCues[caption.index - 1]!, textWidth, fontSize)
     : [];
   const previousPresence = previousLines.length ? 1 - smoothStep(caption.progress / .22) : 0;
   const previousHeight = previousLines.length * lineHeight + fontSize * .45;
-  const blocks: Array<{ lines: string[]; current: boolean }> = [];
+  const blocks: Array<{ lines: RubyCaptionLine[]; current: boolean }> = [];
   let usedLines = 0;
   for (let index = caption.index; index < state.captionCues.length && blocks.length < 4; index += 1) {
-    const lines = captionLines(state.captionCues[index]!.text, textWidth);
+    const lines = rubyCaptionLines(state.captionCues[index]!, textWidth, fontSize);
     if (blocks.length > 0 && usedLines + lines.length > maxLines) break;
     const available = Math.max(1, maxLines - usedLines);
     blocks.push({ lines: lines.slice(0, available), current: index === caption.index });
@@ -816,16 +898,21 @@ function drawFixedReadingPanel(caption: ActiveCaption): void {
   let cursorY = panelY + paddingY;
   if (previousLines.length) {
     ctx.globalAlpha = previousPresence * .72;
-    ctx.fillStyle = '#202020';
-    previousLines.forEach((line, index) => ctx.fillText(line, panelX + paddingX, cursorY + index * lineHeight));
+    previousLines.forEach((line, index) => drawRubyCaptionLine(line, panelX + paddingX, cursorY + fontSize * .72 + index * lineHeight, fontSize, '#202020', '#555'));
     cursorY += previousHeight * previousPresence;
   }
 
   for (const [blockIndex, block] of blocks.entries()) {
     if (cursorY + block.lines.length * lineHeight > panelY + panelHeight - paddingY + 1) break;
     ctx.globalAlpha = block.current ? 1 : Math.max(.34, .62 - blockIndex * .1);
-    ctx.fillStyle = block.current ? '#080808' : '#363636';
-    block.lines.forEach((line, lineIndex) => ctx.fillText(line, panelX + paddingX, cursorY + lineIndex * lineHeight));
+    block.lines.forEach((line, lineIndex) => drawRubyCaptionLine(
+      line,
+      panelX + paddingX,
+      cursorY + fontSize * .72 + lineIndex * lineHeight,
+      fontSize,
+      block.current ? '#080808' : '#363636',
+      block.current ? '#353b18' : '#666'
+    ));
     cursorY += block.lines.length * lineHeight + fontSize * .45;
   }
   ctx.restore();
@@ -1109,6 +1196,135 @@ function addCurrentReviewMarker(): void {
   notify(`要確認へ追加しました（${formatTime(state.playbackElapsed)}）。`, true);
 }
 
+function currentCueForReviewMarker(marker: ReviewMarker): { cue: CaptionCue; index: number } | null {
+  const savedIndex = Math.max(0, Math.min(marker.cueIndex, state.captionCues.length - 1));
+  const indexedCue = state.captionCues[savedIndex];
+  const exactIndexes = state.captionCues.flatMap((cue, index) => cue.text === marker.cueText ? [index] : []);
+  const exactIndex = indexedCue?.text === marker.cueText
+    ? savedIndex
+    : exactIndexes.sort((left, right) => Math.abs(left - marker.cueIndex) - Math.abs(right - marker.cueIndex))[0];
+  const index = exactIndex ?? savedIndex;
+  const cue = state.captionCues[index];
+  return cue ? { cue, index } : null;
+}
+
+function appendReviewCueText(target: HTMLElement, cue: Pick<CaptionCue, 'text' | 'rubyText'>, prefix = ''): void {
+  target.replaceChildren();
+  if (prefix) target.append(document.createTextNode(prefix));
+  const source = cue.rubyText || cue.text;
+  const pattern = /｜([^《\n]+)《([^》\n]+)》|([\p{Script=Han}々〆ヵヶ]+)《([^》\n]+)》/gu;
+  let cursor = 0;
+  for (const match of source.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) target.append(document.createTextNode(source.slice(cursor, index)));
+    const ruby = document.createElement('ruby');
+    ruby.append(document.createTextNode(match[1] ?? match[3] ?? ''));
+    const reading = document.createElement('rt');
+    reading.textContent = match[2] ?? match[4] ?? '';
+    ruby.append(reading);
+    target.append(ruby);
+    cursor = index + match[0].length;
+  }
+  if (cursor < source.length) target.append(document.createTextNode(source.slice(cursor)));
+  target.title = source;
+}
+
+async function generateReviewMarkerAudio(marker: ReviewMarker): Promise<void> {
+  if (voiceGenerationController) return;
+  const current = currentCueForReviewMarker(marker);
+  if (!current) { notify('要確認に対応する台本文を見つけられませんでした。'); return; }
+  if (state.playing) stopPlayback();
+  stopPronunciationPreview();
+  const controller = new AbortController();
+  voiceGenerationController = controller;
+  reviewBusyMarkerId = marker.id;
+  reviewBusyAction = 'generate';
+  setVoiceGenerationState(true);
+  let generatedBlob: Blob | null = null;
+  try {
+    const generated = await fetchSpeech(current.cue.spoken, controller.signal);
+    generatedBlob = generated.blob;
+    reviewPreviewClips.set(marker.id, { blob: generated.blob, spoken: current.cue.spoken });
+    marker.cueIndex = current.index;
+    marker.cueText = current.cue.text;
+    notify('要確認の文だけを再生成しました。確認後に本編へ反映できます。', true);
+  } catch (error) {
+    if (!controller.signal.aborted) notify(errorMessage(error));
+  } finally {
+    if (voiceGenerationController === controller) voiceGenerationController = null;
+    reviewBusyMarkerId = null;
+    reviewBusyAction = null;
+    setVoiceGenerationState(false);
+  }
+  if (generatedBlob) {
+    const previewButton = [...elements.reviewMarkers.querySelectorAll<HTMLButtonElement>('[data-preview-review-marker]')]
+      .find(button => button.dataset.previewReviewMarker === marker.id);
+    if (previewButton) playPronunciationPreview(generatedBlob, previewButton);
+  }
+}
+
+async function applyReviewMarkerAudio(marker: ReviewMarker): Promise<void> {
+  if (voiceGenerationController) return;
+  const generated = reviewPreviewClips.get(marker.id);
+  if (!generated) { notify('先にこの文を再生成して、音声を確認してください。'); return; }
+  if (!state.audioBlob || !state.audioScriptSource) { notify('差し替え先の朗読音声がありません。'); return; }
+  if (!state.audioCaptionTimes) { notify('字幕タイミングの解析完了後に、もう一度お試しください。'); return; }
+  const currentSource = playbackScriptSource();
+  const beforeCues = captionCues(state.audioScriptSource);
+  const afterCues = captionCues(currentSource);
+  if (beforeCues.length !== afterCues.length || beforeCues.some((cue, index) => cue.text !== afterCues[index]?.text)) {
+    notify('元音声から台本文字が変わっています。表示文章を戻すか、音声全体を再生成してください。');
+    return;
+  }
+  const current = currentCueForReviewMarker(marker);
+  if (!current || current.index >= beforeCues.length || state.audioCaptionTimes.length !== beforeCues.length + 1) {
+    notify('元音声の文境界と要確認の位置が一致しません。');
+    return;
+  }
+  if (current.cue.spoken !== generated.spoken) {
+    notify('生成後に台本の読みが変わっています。最新の内容でもう一度「再生成」してください。');
+    return;
+  }
+  const replacement = generated.blob;
+  if (state.playing) stopPlayback();
+  stopPronunciationPreview();
+  const controller = new AbortController();
+  voiceGenerationController = controller;
+  reviewBusyMarkerId = marker.id;
+  reviewBusyAction = 'apply';
+  setVoiceGenerationState(true);
+  try {
+    const manifest = [{
+      start: state.audioCaptionTimes[current.index]!,
+      end: state.audioCaptionTimes[current.index + 1]!,
+      size: replacement.size
+    }];
+    const response = await fetch('/api/audio/repair', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        'x-roudoku-repairs': base64Url(JSON.stringify(manifest))
+      },
+      body: new Blob([replacement, state.audioBlob]),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const data = await response.json() as { error?: string; detail?: string };
+      throw new Error(data.detail ?? data.error ?? '再生成した文を元音声へ反映できませんでした。');
+    }
+    await loadAudio(await response.blob(), `${state.audioName.replace(/\.wav$/iu, '')}-部分修正版.wav`, currentSource);
+    setRepairAudioPreviews([{ label: current.cue.text, blob: replacement }]);
+    notify('確認した文の音声を本編へ反映しました。', true);
+  } catch (error) {
+    if (!controller.signal.aborted) notify(errorMessage(error));
+  } finally {
+    if (voiceGenerationController === controller) voiceGenerationController = null;
+    reviewBusyMarkerId = null;
+    reviewBusyAction = null;
+    setVoiceGenerationState(false);
+  }
+}
+
 function renderReviewMarkers(): void {
   elements.reviewMarkerCount.textContent = `要確認 ${state.reviewMarkers.length}件`;
   if (!state.reviewMarkers.length) {
@@ -1128,15 +1344,36 @@ function renderReviewMarkers(): void {
     const time = document.createElement('time');
     time.textContent = formatTime(marker.elapsed);
     const label = document.createElement('span');
-    label.textContent = marker.note ? `${marker.note} — ${marker.cueText}` : marker.cueText;
+    const currentCue = currentCueForReviewMarker(marker)?.cue;
+    if (currentCue) appendReviewCueText(label, currentCue, marker.note ? `${marker.note} — ` : '');
+    else label.textContent = marker.note ? `${marker.note} — ${marker.cueText}` : marker.cueText;
     jump.append(time, label);
+    const actions = document.createElement('div');
+    actions.className = 'review-marker-actions';
+    const generate = document.createElement('button');
+    generate.type = 'button';
+    generate.dataset.generateReviewMarker = marker.id;
+    generate.textContent = reviewBusyMarkerId === marker.id && reviewBusyAction === 'generate' ? '生成中…' : '再生成';
+    generate.disabled = Boolean(voiceGenerationController);
+    const preview = document.createElement('button');
+    preview.type = 'button';
+    preview.dataset.previewReviewMarker = marker.id;
+    preview.dataset.label = '試聴';
+    preview.textContent = '試聴';
+    preview.disabled = !reviewPreviewClips.has(marker.id) || Boolean(voiceGenerationController);
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.dataset.applyReviewMarker = marker.id;
+    apply.textContent = reviewBusyMarkerId === marker.id && reviewBusyAction === 'apply' ? '反映中…' : '本編へ反映';
+    apply.disabled = !reviewPreviewClips.has(marker.id) || !state.audioBlob || Boolean(voiceGenerationController);
+    actions.append(generate, preview, apply);
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'remove-review-marker';
     remove.dataset.removeReviewMarker = marker.id;
     remove.setAttribute('aria-label', 'チェックを削除');
     remove.textContent = '×';
-    row.append(jump, remove);
+    row.append(jump, remove, actions);
     return row;
   }));
 }
@@ -1157,10 +1394,11 @@ function renderScriptReview(force = false): void {
     elements.reviewContext.replaceChildren(empty);
     return;
   }
+  const visibleCueCount = 9;
   const center = activeIndex >= 0 ? activeIndex : 0;
-  const first = Math.max(0, Math.min(state.captionCues.length - 3, center - 1));
+  const first = Math.max(0, Math.min(state.captionCues.length - visibleCueCount, center - Math.floor(visibleCueCount / 2)));
   const rows: HTMLButtonElement[] = [];
-  for (let index = first; index < Math.min(state.captionCues.length, first + 3); index += 1) {
+  for (let index = first; index < Math.min(state.captionCues.length, first + visibleCueCount); index += 1) {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = `review-cue${index === activeIndex ? ' current' : ''}`;
@@ -1168,7 +1406,7 @@ function renderScriptReview(force = false): void {
     const time = document.createElement('time');
     time.textContent = formatTime(cueOverallStart(index));
     const text = document.createElement('span');
-    text.textContent = state.captionCues[index]!.text;
+    appendReviewCueText(text, state.captionCues[index]!);
     row.append(time, text);
     rows.push(row);
   }
@@ -1205,9 +1443,10 @@ function drawReadingCaption(time: number): void {
   const leftX = elements.canvas.width * Number(elements.captionX.value) / 100;
   const rightPadding = elements.canvas.width * .04;
   const availableWidth = Math.max(fontSize * 1.2, elements.canvas.width - leftX - rightPadding);
-  const lines = captionLines(caption.text, availableWidth);
-  const widest = Math.max(...lines.map(line => ctx.measureText(line).width));
-  const lineHeight = fontSize * 1.43;
+  const cue = state.captionCues[caption.index]!;
+  const lines = rubyCaptionLines(cue, availableWidth, fontSize);
+  const widest = Math.max(...lines.map(line => line.width));
+  const lineHeight = fontSize * 1.75;
   const panelHeight = lines.length * lineHeight + fontSize;
   const requestedY = elements.canvas.height * Number(elements.captionY.value) / 100;
   const baseY = Math.max(panelHeight / 2 + 8, Math.min(elements.canvas.height - panelHeight / 2 - 8, requestedY)) + windY;
@@ -1232,15 +1471,21 @@ function drawReadingCaption(time: number): void {
   for (let trail = 3; trail >= 1; trail -= 1) {
     ctx.globalAlpha = opacity * (.025 + entering * .035) * trail;
     ctx.fillStyle = '#eef8d1';
-    lines.forEach((line, index) => ctx.fillText(line, textX + trail * 13, baseY + (index - (lines.length - 1) / 2) * lineHeight));
+    lines.forEach((line, index) => ctx.fillText(line.plain, textX + trail * 13, baseY + (index - (lines.length - 1) / 2) * lineHeight));
   }
 
   ctx.filter = `blur(${(entering + leaving) * 1.4}px)`;
   ctx.shadowColor = 'rgba(0,0,0,.9)';
   ctx.shadowBlur = 9;
   ctx.globalAlpha = opacity;
-  ctx.fillStyle = '#f7f5ee';
-  lines.forEach((line, index) => ctx.fillText(line, textX, baseY + (index - (lines.length - 1) / 2) * lineHeight));
+  lines.forEach((line, index) => drawRubyCaptionLine(
+    line,
+    textX,
+    baseY + (index - (lines.length - 1) / 2) * lineHeight,
+    fontSize,
+    '#f7f5ee',
+    '#dff58b'
+  ));
   ctx.globalAlpha = opacity * .9;
   ctx.fillStyle = '#d8ff45';
   ctx.fillRect(textX, panelY + panelHeight - 5, Math.min(180, panelWidth * .26), 2);
@@ -1808,16 +2053,18 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   if (state.audioBuffer) {
     session.source = ac.createBufferSource(); session.source.buffer = state.audioBuffer;
     analyser = ac.createAnalyser(); analyser.fftSize = 512; data = new Uint8Array(analyser.fftSize);
-    session.source.connect(analyser); analyser.connect(ac.destination);
-    if (destination) analyser.connect(destination);
+    session.narrationGain = ac.createGain();
+    session.source.connect(analyser); analyser.connect(session.narrationGain); session.narrationGain.connect(ac.destination);
+    if (destination) session.narrationGain.connect(destination);
   } else if (state.audioElement) {
     // 省メモリで読み込んだ長編音声も、通常プレビュー・録画の両方で実波形を使う。
     // MediaElementSourceは同じaudio要素に一度しか作れないためstateへ保持する。
     state.audioMediaNode ??= ac.createMediaElementSource(state.audioElement);
     state.audioMediaNode.disconnect();
     analyser = ac.createAnalyser(); analyser.fftSize = 512; data = new Uint8Array(analyser.fftSize);
-    state.audioMediaNode.connect(analyser); analyser.connect(ac.destination);
-    if (destination) analyser.connect(destination);
+    session.narrationGain = ac.createGain();
+    state.audioMediaNode.connect(analyser); analyser.connect(session.narrationGain); session.narrationGain.connect(ac.destination);
+    if (destination) session.narrationGain.connect(destination);
   }
   if (state.bgmBuffer) {
     session.bgmSource = ac.createBufferSource();
@@ -1864,6 +2111,26 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
 
   const start = ac.currentTime;
   const remainingDuration = Math.max(0, session.duration - session.startOffset);
+  if (session.narrationGain) {
+    // 途中のサンプルから再生すると波形が不連続になり、開始時だけクリック音が出る。
+    // 約25msだけ滑らかに立ち上げ・収束させ、本文中の音量や音質は維持する。
+    const narrationDelay = Math.max(0, session.openingDuration - session.startOffset);
+    const narrationOffset = Math.max(0, session.startOffset - session.openingDuration);
+    const playableNarration = Math.max(0, Math.min(
+      session.narrationDuration - narrationOffset,
+      remainingDuration - narrationDelay
+    ));
+    const narrationStart = start + narrationDelay;
+    const narrationEnd = narrationStart + playableNarration;
+    const edgeFade = Math.min(.025, playableNarration / 3);
+    session.narrationGain.gain.setValueAtTime(0, start);
+    session.narrationGain.gain.setValueAtTime(0, narrationStart);
+    if (playableNarration > 0) {
+      session.narrationGain.gain.linearRampToValueAtTime(1, narrationStart + edgeFade);
+      session.narrationGain.gain.setValueAtTime(1, Math.max(narrationStart + edgeFade, narrationEnd - edgeFade));
+      session.narrationGain.gain.linearRampToValueAtTime(0, narrationEnd);
+    }
+  }
   if (session.bgmGain) {
     const volume = Number(elements.bgmVolume.value) / 100;
     const fade = Math.min(1, remainingDuration / 4);
@@ -2190,6 +2457,8 @@ async function loadProject(file: File): Promise<void> {
       }];
     })
     : [];
+  stopPronunciationPreview();
+  reviewPreviewClips.clear();
   elements.scriptReviewBody.hidden = project.reviewPanelOpen === false;
   elements.toggleScriptReview.setAttribute('aria-expanded', String(!elements.scriptReviewBody.hidden));
   elements.toggleScriptReview.textContent = elements.scriptReviewBody.hidden ? '開く' : '閉じる';
@@ -2489,6 +2758,7 @@ function setVoiceGenerationState(generating: boolean): void {
   elements.cancelVoiceFromScript.hidden = !generating;
   elements.pronunciationPreviewList.querySelectorAll<HTMLButtonElement>('button').forEach(button => { button.disabled = generating; });
   elements.repairAudioPreviewList.querySelectorAll<HTMLButtonElement>('button').forEach(button => { button.disabled = generating; });
+  renderReviewMarkers();
 }
 
 async function removeNarrationClicks(): Promise<void> {
@@ -2936,8 +3206,27 @@ elements.reviewContext.addEventListener('click', event => {
   if (button) seekToReviewCue(Number(button.dataset.reviewCueIndex));
 });
 elements.reviewMarkers.addEventListener('click', event => {
+  const generate = (event.target as Element).closest<HTMLButtonElement>('[data-generate-review-marker]');
+  if (generate) {
+    const marker = state.reviewMarkers.find(item => item.id === generate.dataset.generateReviewMarker);
+    if (marker) void generateReviewMarkerAudio(marker);
+    return;
+  }
+  const preview = (event.target as Element).closest<HTMLButtonElement>('[data-preview-review-marker]');
+  if (preview) {
+    const clip = reviewPreviewClips.get(preview.dataset.previewReviewMarker ?? '');
+    if (clip) playPronunciationPreview(clip.blob, preview);
+    return;
+  }
+  const apply = (event.target as Element).closest<HTMLButtonElement>('[data-apply-review-marker]');
+  if (apply) {
+    const marker = state.reviewMarkers.find(item => item.id === apply.dataset.applyReviewMarker);
+    if (marker) void applyReviewMarkerAudio(marker);
+    return;
+  }
   const remove = (event.target as Element).closest<HTMLButtonElement>('[data-remove-review-marker]');
   if (remove) {
+    reviewPreviewClips.delete(remove.dataset.removeReviewMarker ?? '');
     state.reviewMarkers = state.reviewMarkers.filter(marker => marker.id !== remove.dataset.removeReviewMarker);
     renderReviewMarkers();
     return;
