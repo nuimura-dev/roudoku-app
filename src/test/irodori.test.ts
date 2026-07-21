@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { irodoriAttackFadeMs, irodoriPauseMs, irodoriPayload, parseIrodoriSse, splitIrodoriText } from '../irodori.js';
+import { encodeIrodoriTimeline, irodoriAttackFadeMs, irodoriPauseMs, irodoriPayload, parseIrodoriSse, splitIrodoriText, wavDurationSeconds } from '../irodori.js';
 
 test('Irodori用の長文分割付きリクエストを作る', () => {
   assert.deepEqual(irodoriPayload({
@@ -72,4 +72,23 @@ test('Irodoriの上限内で句読点を優先して長文を分割する', () =
 test('区切りがない長文も上限で分割する', () => {
   const chunks = splitIrodoriText('読'.repeat(8500), 4000);
   assert.deepEqual(chunks.map(chunk => chunk.length), [4000, 4000, 500]);
+});
+
+test('WAVチャンクの実時間と字幕タイムラインを記録する', () => {
+  const wav = Buffer.alloc(44 + 48000 * 2);
+  wav.write('RIFF', 0);
+  wav.writeUInt32LE(wav.length - 8, 4);
+  wav.write('WAVE', 8);
+  wav.write('fmt ', 12);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(48000, 24);
+  wav.writeUInt32LE(96000, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(96000, 40);
+  assert.equal(wavDurationSeconds(wav), 1);
+  assert.equal(encodeIrodoriTimeline([{ chars: 4, endMs: 1560 }, { chars: 3, endMs: 4100 }]), '4:1560,3:4100');
 });

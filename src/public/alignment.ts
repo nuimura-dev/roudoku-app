@@ -29,3 +29,20 @@ export function matchTimelineAnchors(expected: readonly number[], candidates: re
   }
   return selected.reverse();
 }
+
+export function matchNearestTimelineAnchors(expected: readonly number[], candidates: readonly number[]): number[] {
+  const selected: number[] = [];
+  let previousCandidate = -1;
+  for (const expectedTime of expected) {
+    let bestCandidate = -1;
+    let bestError = Number.POSITIVE_INFINITY;
+    for (let index = previousCandidate + 1; index < candidates.length; index += 1) {
+      const error = Math.abs(candidates[index]! - expectedTime);
+      if (error < bestError) { bestError = error; bestCandidate = index; }
+    }
+    if (bestCandidate < 0) break;
+    selected.push(bestCandidate);
+    previousCandidate = bestCandidate;
+  }
+  return selected;
+}

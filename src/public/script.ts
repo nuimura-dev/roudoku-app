@@ -89,7 +89,10 @@ export function parseScript(source: unknown): ScriptSegment[] {
 }
 
 export function plainText(source: unknown): string {
-  return parseScript(source).map(item => item.text).filter(Boolean).join(' ')
+  // 字幕は句読点でキューを分ける際、直後の横方向の空白を取り除く。
+  // 音声側にも同じ正規化を適用し、「、　」のような入力以降の同期ずれを防ぐ。
+  const normalizedSource = String(source ?? '').replace(/([。、，,．.!！?？…])[\p{Zs}\t]+/gu, '$1');
+  return parseScript(normalizedSource).map(item => item.text).filter(Boolean).join(' ')
     .replace(/｜([^《\n]+)《([^》\n]+)》/g, '$2')
     .replace(/([\p{Script=Han}々〆ヵヶ]+)《([^》\n]+)》/gu, '$2')
     .replace(/[A-Za-z][A-Za-z0-9]*/g, latinReading);
@@ -128,7 +131,6 @@ export function captionCues(source: unknown): CaptionCue[] {
   let current = '';
   let rubyText = '';
   let spoken = '';
-  let visibleChars = 0;
   const push = (): void => {
     const text = current.replace(/\s+/gu, ' ').trim();
     const annotatedText = rubyText.replace(/\s+/gu, ' ').trim();
@@ -136,7 +138,6 @@ export function captionCues(source: unknown): CaptionCue[] {
     current = '';
     rubyText = '';
     spoken = '';
-    visibleChars = 0;
     if (text) {
       const spokenValue = plainText(spokenText);
       cues.push({ text, rubyText: annotatedText, spoken: spokenValue, weight: Math.max(1, [...spokenValue].length + captionPauseWeight(spokenText)) });
@@ -151,7 +152,6 @@ export function captionCues(source: unknown): CaptionCue[] {
     current += unit.display;
     rubyText += unit.rubyText;
     spoken += unit.spoken;
-    if (!/\s/u.test(unit.display)) visibleChars += [...unit.display].length;
     const character = [...unit.display].at(-1) ?? '';
     const next = units[index + 1]?.display[0];
     const previous = [...(units[index - 1]?.display ?? '')].at(-1);
@@ -159,10 +159,71 @@ export function captionCues(source: unknown): CaptionCue[] {
     const closingEnd = closingMarks.has(character)
       && Boolean(previous && (strong.has(previous) || closingMarks.has(previous)))
       && (!next || !closingMarks.has(next));
-    if (strongEnd || closingEnd || /[\n\r]/u.test(character) || (comma.has(character) && visibleChars >= 18) || visibleChars >= 34) push();
+    // 音声に間がない場所では切らず、Irodoriが実際に間を作る読点・句点で区切る。
+    // 表示上の長文は描画時に折り返す。
+    if (strongEnd || closingEnd || /[\n\r]/u.test(character) || comma.has(character)) push();
   });
   push();
   return cues;
+}
+
+export interface SpeechTimelineChunk {
+  chars: number;
+  endMs: number;
+}
+
+export function parseSpeechTimeline(value: string | null): SpeechTimelineChunk[] | null {
+  if (!value) return null;
+  const chunks: SpeechTimelineChunk[] = [];
+  let previousEnd = 0;
+  for (const entry of value.split(',')) {
+    const match = /^(\d+):(\d+)$/u.exec(entry.trim());
+    if (!match) return null;
+    const chars = Number(match[1]);
+    const endMs = Number(match[2]);
+    if (!Number.isSafeInteger(chars) || chars < 0 || !Number.isSafeInteger(endMs) || endMs <= previousEnd) return null;
+    chunks.push({ chars, endMs });
+    previousEnd = endMs;
+  }
+  return chunks.length > 0 && chunks.some(chunk => chunk.chars > 0) ? chunks : null;
+}
+
+export function captionTimesFromSpeechTimeline(
+  cues: readonly CaptionCue[],
+  chunks: readonly SpeechTimelineChunk[],
+  audioDuration: number
+): number[] | null {
+  if (!cues.length || !chunks.length || !Number.isFinite(audioDuration) || audioDuration <= 0) return null;
+  const cueChars = cues.map(cue => [...cue.spoken.replace(/\s/gu, '')].length);
+  const totalCueChars = cueChars.reduce((sum, chars) => sum + chars, 0);
+  const totalTimelineChars = chunks.reduce((sum, chunk) => sum + chunk.chars, 0);
+  const finalMs = chunks.at(-1)?.endMs ?? 0;
+  if (totalCueChars <= 0 || totalTimelineChars <= 0 || finalMs <= 0) return null;
+
+  const scale = audioDuration / (finalMs / 1000);
+  const times = [0];
+  let elapsedCueChars = 0;
+  let chunkIndex = 0;
+  let chunkStartChars = 0;
+  let chunkStartMs = 0;
+  for (const chars of cueChars) {
+    elapsedCueChars += chars;
+    const targetChars = elapsedCueChars / totalCueChars * totalTimelineChars;
+    while (chunkIndex < chunks.length - 1 && targetChars > chunkStartChars + chunks[chunkIndex]!.chars) {
+      chunkStartChars += chunks[chunkIndex]!.chars;
+      chunkStartMs = chunks[chunkIndex]!.endMs;
+      chunkIndex += 1;
+    }
+    const chunk = chunks[chunkIndex]!;
+    const fraction = chunk.chars > 0
+      ? Math.max(0, Math.min(1, (targetChars - chunkStartChars) / chunk.chars))
+      : 1;
+    times.push((chunkStartMs + (chunk.endMs - chunkStartMs) * fraction) / 1000 * scale);
+  }
+  times[times.length - 1] = audioDuration;
+  return times.every((time, index) => Number.isFinite(time) && time >= 0 && (index === 0 || time >= times[index - 1]!))
+    ? times
+    : null;
 }
 
 export function activeCaption(cues: readonly CaptionCue[], progress: number): ActiveCaption | null {

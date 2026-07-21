@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { aozoraFirstPublication, aozoraUrl, findAozoraXhtml, isAozoraXhtml } from './aozora.js';
-import { irodoriAttackFadeMs, irodoriPauseMs, irodoriPayload, parseIrodoriSse, splitIrodoriText, type IrodoriSpeechRequest } from './irodori.js';
+import { encodeIrodoriTimeline, irodoriAttackFadeMs, irodoriPauseMs, irodoriPayload, parseIrodoriSse, splitIrodoriText, wavDurationSeconds, type IrodoriSpeechRequest, type IrodoriTimelineChunk } from './irodori.js';
 
 const port = Number(process.env.PORT || 4173);
 const publicDir = join(import.meta.dirname, 'public');
@@ -152,6 +152,8 @@ async function irodoriSpeech(req: IncomingMessage, res: ServerResponse): Promise
     const outputPath = join(audioDir, 'speech.wav');
     const list: string[] = [];
     const pauseFiles = new Map<number, string>();
+    const timeline: IrodoriTimelineChunk[] = [];
+    let timelineMs = 0;
     let audioIndex = 0;
     for (const [index, text] of textChunks.entries()) {
       console.info(`Irodori音声を生成中: ${index + 1}/${textChunks.length}`);
@@ -169,9 +171,10 @@ async function irodoriSpeech(req: IncomingMessage, res: ServerResponse): Promise
       const streamChunks = parseIrodoriSse(await response.text());
       if (streamChunks.length === 0) throw new Error(`音声 ${index + 1}/${textChunks.length}: 音声チャンクを受信できませんでした`);
       for (const chunk of streamChunks) {
+        const rawAudio = Buffer.from(chunk.audioBase64, 'base64');
         const rawName = `chunk-${audioIndex}-raw.wav`;
         const name = attackFadeMs > 0 ? `chunk-${audioIndex}.wav` : rawName;
-        await writeFile(join(audioDir, rawName), Buffer.from(chunk.audioBase64, 'base64'));
+        await writeFile(join(audioDir, rawName), rawAudio);
         if (attackFadeMs > 0) {
           await run('ffmpeg', [
             '-y', '-i', join(audioDir, rawName),
@@ -192,6 +195,9 @@ async function irodoriSpeech(req: IncomingMessage, res: ServerResponse): Promise
         }
         const pauseName = pauseFiles.get(pauseMs);
         if (pauseName) list.push(`file '${pauseName}'`);
+        timelineMs += Math.round(wavDurationSeconds(rawAudio) * 1000) + pauseMs;
+        // 台本側では表示用の空白を字幕境界で除くため、照合用の文字数も空白を数えない。
+        timeline.push({ chars: [...chunk.text.replace(/\s/gu, '')].length, endMs: timelineMs });
         audioIndex += 1;
       }
     }
@@ -203,7 +209,8 @@ async function irodoriSpeech(req: IncomingMessage, res: ServerResponse): Promise
     const audio = await stat(outputPath);
     res.writeHead(200, {
       'content-type': 'audio/wav',
-      'content-length': audio.size
+      'content-length': audio.size,
+      'x-roudoku-timeline': encodeIrodoriTimeline(timeline)
     });
     await pipeline(createReadStream(outputPath), res);
   } catch (error) {
@@ -453,7 +460,8 @@ async function staticFile(req: IncomingMessage, res: ServerResponse): Promise<vo
     const file = await readFile(path);
     res.writeHead(200, {
       'content-type': mime[extname(path)] || 'application/octet-stream',
-      'content-length': file.length
+      'content-length': file.length,
+      'cache-control': 'no-store'
     });
     res.end(file);
   } catch (error) {

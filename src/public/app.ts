@@ -1,5 +1,5 @@
-import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, plainText, type ActiveCaption, type CaptionCue, type Expression } from './script.js';
-import { matchTimelineAnchors } from './alignment.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, type ActiveCaption, type CaptionCue, type Expression, type SpeechTimelineChunk } from './script.js';
+import { matchNearestTimelineAnchors, matchTimelineAnchors } from './alignment.js';
 import { createProjectBundle, maxProjectBundleBytes, readProjectBundle } from './project-bundle.js';
 
 type Viseme = 'closed' | 'a' | 'i' | 'u' | 'e' | 'o';
@@ -251,6 +251,8 @@ let repairPreviewClips: Array<{ label: string; blob: Blob }> = [];
 const reviewPreviewClips = new Map<string, { blob: Blob; spoken: string }>();
 let reviewBusyMarkerId: string | null = null;
 let reviewBusyAction: 'generate' | 'apply' | null = null;
+let captionAlignmentPending = false;
+const commaCaptionLeadSeconds = .5;
 let exportController: AbortController | null = null;
 let exportCancelled = false;
 let combinedWorkflowRunning = false;
@@ -321,6 +323,14 @@ function notify(message: string, success = false): void {
 function formatTime(seconds: number): string {
   const value = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
   return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
+}
+
+function formatReviewTime(seconds: number): string {
+  const value = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+  const tenths = Math.floor(value * 10 + 1e-6);
+  const minutes = Math.floor(tenths / 600);
+  const remainder = tenths % 600;
+  return `${String(minutes).padStart(2, '0')}:${String(Math.floor(remainder / 10)).padStart(2, '0')}.${remainder % 10}`;
 }
 
 function metadataNarration(): string {
@@ -1000,6 +1010,52 @@ function alignCaptionTimesFromSilences(cues: readonly CaptionCue[], silences: re
     // 無音が不足する音声では、見つかった範囲だけを順番にアンカー化する。
     required.slice(0, candidates.length).forEach((anchor, index) => anchors.set(anchor.boundary, candidates[index]!.end));
   }
+  // 句点で固定した区間の内側では、読点後にIrodoriが作る約0.5秒以上の無音も
+  // 順序付きで照合する。長い一文を文字数だけで配分したときの累積ずれを抑える。
+  const periodAnchors = [...anchors].sort((left, right) => left[0] - right[0]);
+  for (let anchorIndex = 0; anchorIndex < periodAnchors.length - 1; anchorIndex += 1) {
+    const [fromCue, fromTime] = periodAnchors[anchorIndex]!;
+    const [toCue, toTime] = periodAnchors[anchorIndex + 1]!;
+    const intervalWeight = cues.slice(fromCue, toCue).reduce((sum, cue) => sum + cue.weight, 0);
+    if (intervalWeight <= 0) continue;
+    const commaAnchors: Array<{ expected: number; boundary: number | null }> = [];
+    let elapsedWeight = 0;
+    for (let cueIndex = fromCue; cueIndex < toCue; cueIndex += 1) {
+      const cue = cues[cueIndex]!;
+      const characters = [...cue.spoken];
+      for (const [characterIndex, character] of characters.entries()) {
+        elapsedWeight += 1;
+        if (/[、，,]/u.test(character)) {
+          elapsedWeight += 3;
+          const trailing = characters.slice(characterIndex + 1).every(value => /\s/u.test(value));
+          commaAnchors.push({
+            expected: fromTime + (toTime - fromTime) * elapsedWeight / intervalWeight,
+            boundary: trailing && cueIndex + 1 < toCue ? cueIndex + 1 : null
+          });
+        } else if (/…/u.test(character)) elapsedWeight += 4.5;
+        else if (/[!！?？]/u.test(character)) elapsedWeight += 3.6;
+        else if (/[。．.]/u.test(character)) elapsedWeight += 11.4;
+      }
+    }
+    const commaSilences = silences.filter(silence =>
+      silence.start >= fromTime && silence.end <= toTime && silence.duration >= .3 && silence.duration < 1.8
+    );
+    if (!commaAnchors.length || !commaSilences.length) continue;
+    // 長文全体の誤差最小化で隣の読点へ一つずれることを避けるため、各読点を
+    // 予測時刻に最も近い未使用の無音へ単調に対応させる。
+    const selected = matchNearestTimelineAnchors(
+      commaAnchors.map(anchor => anchor.expected),
+      commaSilences.map(silence => silence.end)
+    );
+    commaAnchors.forEach((anchor, index) => {
+      const bestIndex = selected[index];
+      if (bestIndex === undefined) return;
+      // 読点の休止より少し前に次字幕を先出しし、知覚上の約0.5秒の遅れを補う。
+      if (anchor.boundary !== null) {
+        anchors.set(anchor.boundary, Math.max(fromTime, commaSilences[bestIndex]!.start - commaCaptionLeadSeconds));
+      }
+    });
+  }
   const times = Array<number>(cues.length + 1).fill(0);
   const orderedAnchors = [...anchors].sort((a, b) => a[0] - b[0]);
   for (let anchorIndex = 0; anchorIndex < orderedAnchors.length - 1; anchorIndex += 1) {
@@ -1115,6 +1171,7 @@ async function alignLongWavCaptionTimes(blob: Blob, cues: readonly CaptionCue[])
 }
 
 function activeCaptionForPlayback(): ActiveCaption | null {
+  if (captionAlignmentPending) return null;
   const times = state.captionTimes;
   if (!times || times.length !== state.captionCues.length + 1) return activeCaption(state.captionCues, state.progress);
   const narrationElapsed = Math.max(0, state.playbackElapsed - (state.session?.openingDuration ?? openingCardDuration()));
@@ -1203,7 +1260,12 @@ function currentCueForReviewMarker(marker: ReviewMarker): { cue: CaptionCue; ind
   const exactIndex = indexedCue?.text === marker.cueText
     ? savedIndex
     : exactIndexes.sort((left, right) => Math.abs(left - marker.cueIndex) - Math.abs(right - marker.cueIndex))[0];
-  const index = exactIndex ?? savedIndex;
+  const narrationElapsed = marker.elapsed - openingCardDuration();
+  const elapsedIndex = state.captionTimes?.length === state.captionCues.length + 1
+    ? state.captionCues.findIndex((_, index) => narrationElapsed < state.captionTimes![index + 1]!)
+    : -1;
+  // 字幕の分割規則が変わって保存文と完全一致しなくなった場合は、保存時刻を優先する。
+  const index = exactIndex ?? (elapsedIndex >= 0 ? elapsedIndex : savedIndex);
   const cue = state.captionCues[index];
   return cue ? { cue, index } : null;
 }
@@ -1345,7 +1407,7 @@ function renderReviewMarkers(): void {
     time.textContent = formatTime(marker.elapsed);
     const label = document.createElement('span');
     const currentCue = currentCueForReviewMarker(marker)?.cue;
-    if (currentCue) appendReviewCueText(label, currentCue, marker.note ? `${marker.note} — ` : '');
+    if (currentCue?.text === marker.cueText) appendReviewCueText(label, currentCue, marker.note ? `${marker.note} — ` : '');
     else label.textContent = marker.note ? `${marker.note} — ${marker.cueText}` : marker.cueText;
     jump.append(time, label);
     const actions = document.createElement('div');
@@ -1382,8 +1444,10 @@ function renderScriptReview(force = false): void {
   const active = reviewCaptionForPlayback();
   const activeIndex = active?.index ?? -1;
   elements.markReviewIssue.disabled = activeIndex < 0;
-  elements.reviewPosition.textContent = active
-    ? `${formatTime(state.playbackElapsed)} · ${activeIndex + 1} / ${state.captionCues.length}`
+  elements.reviewPosition.textContent = captionAlignmentPending
+    ? '字幕タイミングを解析中…'
+    : active
+    ? `${formatReviewTime(state.playbackElapsed)} · ${activeIndex + 1} / ${state.captionCues.length}`
     : state.playbackElapsed < openingCardDuration() ? '冒頭カード' : '本文外';
   if (!force && state.reviewCueIndex === activeIndex) return;
   state.reviewCueIndex = activeIndex;
@@ -1404,7 +1468,7 @@ function renderScriptReview(force = false): void {
     row.className = `review-cue${index === activeIndex ? ' current' : ''}`;
     row.dataset.reviewCueIndex = String(index);
     const time = document.createElement('time');
-    time.textContent = formatTime(cueOverallStart(index));
+    time.textContent = formatReviewTime(cueOverallStart(index));
     const text = document.createElement('span');
     appendReviewCueText(text, state.captionCues[index]!);
     row.append(time, text);
@@ -1599,6 +1663,7 @@ function updateScript(): void {
   }));
   updateEnglishRubyPanel(source);
   state.reviewCueIndex = -2;
+  renderReviewMarkers();
   renderScriptReview(true);
   if (!state.playing) draw();
 }
@@ -1745,6 +1810,7 @@ function clearNarrationAudio(): void {
   state.captionTimes = null;
   state.audioScriptSource = null;
   state.audioCaptionTimes = null;
+  captionAlignmentPending = false;
   elements.saveAudio.disabled = true;
   elements.saveAudioFromScript.disabled = true;
   elements.declickAudio.disabled = true;
@@ -1758,7 +1824,34 @@ function resetPlaybackPosition(): void {
   state.playbackPhase = 'idle';
 }
 
-async function loadLongAudio(blob: Blob, name: string, scriptSource: string): Promise<void> {
+interface AudioTiming {
+  chunks?: readonly SpeechTimelineChunk[];
+  times?: readonly number[];
+}
+
+function validatedCaptionTimes(times: readonly number[] | undefined, duration: number): number[] | null {
+  if (!Array.isArray(times) || times.length !== state.captionCues.length + 1 || !Number.isFinite(duration) || duration <= 0) return null;
+  const savedEnd = times.at(-1) ?? 0;
+  if (savedEnd <= 0 || !times.every((time, index) => Number.isFinite(time) && time >= 0 && (index === 0 || time >= times[index - 1]!))) return null;
+  const scale = duration / savedEnd;
+  const restored = times.map(time => time * scale);
+  restored[0] = 0;
+  restored[restored.length - 1] = duration;
+  return restored;
+}
+
+function applyKnownCaptionTiming(duration: number, timing?: AudioTiming): boolean {
+  const times = validatedCaptionTimes(timing?.times, duration)
+    ?? (timing?.chunks ? captionTimesFromSpeechTimeline(state.captionCues, timing.chunks, duration) : null);
+  if (!times) return false;
+  state.captionTimes = times;
+  state.audioCaptionTimes = times;
+  captionAlignmentPending = false;
+  elements.statusText.textContent = '準備完了';
+  return true;
+}
+
+async function loadLongAudio(blob: Blob, name: string, scriptSource: string, timing?: AudioTiming): Promise<void> {
   const url = URL.createObjectURL(blob);
   const audio = new Audio();
   audio.preload = 'metadata';
@@ -1784,9 +1877,12 @@ async function loadLongAudio(blob: Blob, name: string, scriptSource: string): Pr
     elements.declickAudio.disabled = false;
     elements.declickAudioFromScript.disabled = false;
     elements.audioName.textContent = `${name} · ${formatTime(audio.duration)} · 長編省メモリ`;
-    notify('長編音声を省メモリモードで読み込みました。WAVの無音位置をバックグラウンドで解析しています。', true);
+    const hasKnownTiming = applyKnownCaptionTiming(audio.duration, timing);
+    notify(hasKnownTiming
+      ? '長編音声と生成時の字幕タイムラインを読み込みました。'
+      : '長編音声を省メモリモードで読み込みました。WAVの無音位置をバックグラウンドで解析しています。', true);
     draw();
-    scheduleLongCaptionAlignment(blob);
+    if (!hasKnownTiming) scheduleLongCaptionAlignment(blob);
   } catch (error) {
     URL.revokeObjectURL(url);
     throw error;
@@ -1796,14 +1892,22 @@ async function loadLongAudio(blob: Blob, name: string, scriptSource: string): Pr
 function scheduleCaptionAlignment(buffer: AudioBuffer): void {
   const targetBuffer = buffer;
   const targetCues = state.captionCues;
+  captionAlignmentPending = true;
+  elements.statusText.textContent = '字幕タイミングを解析中…';
   void alignCaptionTimes(targetBuffer, targetCues).then(times => {
     if (state.audioBuffer !== targetBuffer || state.captionCues !== targetCues) return;
     state.captionTimes = times;
     if (state.audioScriptSource === playbackScriptSource()) state.audioCaptionTimes = times;
+    captionAlignmentPending = false;
+    elements.statusText.textContent = '準備完了';
     draw();
     notify('字幕タイミングの補正が完了しました。', true);
   }).catch(error => {
-    if (state.audioBuffer === targetBuffer) state.captionTimes = null;
+    if (state.audioBuffer === targetBuffer) {
+      state.captionTimes = null;
+      captionAlignmentPending = false;
+      elements.statusText.textContent = '字幕タイミング解析失敗';
+    }
     console.warn(`字幕タイミングを補正できませんでした: ${errorMessage(error)}`);
   });
 }
@@ -1811,32 +1915,41 @@ function scheduleCaptionAlignment(buffer: AudioBuffer): void {
 function scheduleLongCaptionAlignment(blob: Blob): void {
   const targetBlob = blob;
   const targetCues = state.captionCues;
+  captionAlignmentPending = true;
+  elements.statusText.textContent = '長編WAVの字幕タイミングを解析中…';
   void alignLongWavCaptionTimes(targetBlob, targetCues).then(times => {
     if (state.audioBlob !== targetBlob || state.captionCues !== targetCues) return;
     state.captionTimes = times;
     if (state.audioScriptSource === playbackScriptSource()) state.audioCaptionTimes = times;
+    captionAlignmentPending = false;
+    elements.statusText.textContent = times ? '準備完了' : '句読点による仮同期';
     draw();
     notify(times
       ? '長編WAVの無音位置に合わせて字幕タイミングを補正しました。'
       : 'この音声形式では無音解析を使えないため、句読点から字幕を同期します。', true);
   }).catch(error => {
-    if (state.audioBlob === targetBlob) state.captionTimes = null;
+    if (state.audioBlob === targetBlob) {
+      state.captionTimes = null;
+      captionAlignmentPending = false;
+      elements.statusText.textContent = '字幕タイミング解析失敗';
+    }
     console.warn(`長編WAVの字幕タイミングを補正できませんでした: ${errorMessage(error)}`);
   });
 }
 
-async function loadAudio(blob: Blob, name: string, scriptSource = playbackScriptSource()): Promise<void> {
+async function loadAudio(blob: Blob, name: string, scriptSource = playbackScriptSource(), timing?: AudioTiming): Promise<void> {
   const ac = await ensureAudioContext();
   if (state.playing) stopPlayback(true);
   clearRepairAudioPreviews();
   try {
     if (blob.size > 48 * 1024 * 1024) {
-      await loadLongAudio(blob, name, scriptSource);
+      await loadLongAudio(blob, name, scriptSource, timing);
       return;
     }
     const buffer = await ac.decodeAudioData(await blob.arrayBuffer());
     clearNarrationAudio();
     state.audioBuffer = buffer; state.audioBlob = blob; state.audioName = name;
+    state.audioDuration = buffer.duration;
     state.audioScriptSource = scriptSource;
     resetPlaybackPosition();
     elements.saveAudio.disabled = false;
@@ -1844,9 +1957,12 @@ async function loadAudio(blob: Blob, name: string, scriptSource = playbackScript
     elements.declickAudio.disabled = false;
     elements.declickAudioFromScript.disabled = false;
     elements.audioName.textContent = `${name} · ${formatTime(buffer.duration)}`;
-    notify('音声を読み込みました。字幕タイミングをバックグラウンドで補正しています。', true);
+    const hasKnownTiming = applyKnownCaptionTiming(buffer.duration, timing);
+    notify(hasKnownTiming
+      ? '音声と生成時の字幕タイムラインを読み込みました。'
+      : '音声を読み込みました。字幕タイミングをバックグラウンドで補正しています。', true);
     draw();
-    scheduleCaptionAlignment(buffer);
+    if (!hasKnownTiming) scheduleCaptionAlignment(buffer);
   } catch (error) {
     notify('この音声形式をブラウザで読み込めませんでした。WAVまたはMP3をお試しください。');
     throw error;
@@ -1991,7 +2107,15 @@ function updatePlaybackPosition(elapsed: number, total = duration()): void {
 
 function animationLoop(session: PlaybackSession, start: number, analyser: AnalyserNode | null, data: Uint8Array<ArrayBuffer> | null): void {
   const now = audioContext?.currentTime ?? performance.now() / 1000;
-  const elapsed = Math.min(session.duration, Math.max(0, session.startOffset + now - start));
+  const clockElapsed = Math.min(session.duration, Math.max(0, session.startOffset + now - start));
+  const media = state.audioElement;
+  // 長編省メモリ再生ではHTMLMediaElementとAudioContextが別々の時計で進む。
+  // 実音声のcurrentTimeを正として、長時間再生時の字幕・台本チェックのずれを防ぐ。
+  const elapsed = media && !media.paused && !media.ended
+    ? Math.min(session.duration, session.openingDuration + Math.max(0, media.currentTime))
+    : media?.ended
+      ? Math.max(clockElapsed, session.openingDuration + session.narrationDuration)
+      : clockElapsed;
   updatePlaybackPosition(elapsed, session.duration);
   const narrationElapsed = elapsed - session.openingDuration;
   const narrating = narrationElapsed >= 0 && narrationElapsed < session.narrationDuration;
@@ -2024,6 +2148,10 @@ function animationLoop(session: PlaybackSession, start: number, analyser: Analys
 
 async function beginPlayback({ record = false }: { record?: boolean } = {}): Promise<Blob | null> {
   if (state.playing) { stopPlayback(); return null; }
+  if (captionAlignmentPending) {
+    notify('字幕タイミングを解析中です。「補正が完了しました」と表示されてから再生してください。', true);
+    return null;
+  }
   if (!state.images.neutral) { notify('先に「キャラクター」から基本の立ち絵を選択してください。'); return null; }
   const ac = await ensureAudioContext();
   const opening = openingCardDuration();
@@ -2265,6 +2393,10 @@ interface SavedProject {
   externalFiles: string[];
   reviewMarkers?: ReviewMarker[];
   reviewPanelOpen?: boolean;
+  captionTimeline?: {
+    scriptSource: string;
+    times: number[];
+  };
 }
 
 function projectControl(id: string): HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null {
@@ -2298,6 +2430,11 @@ function currentSavedProject(): SavedProject {
     elements.bgmFile.files?.[0]?.name,
     elements.ambientFile.files?.[0]?.name
   ].filter((name): name is string => Boolean(name));
+  const scriptSource = playbackScriptSource();
+  const savedCaptionTimes = state.audioScriptSource === scriptSource
+    && state.audioCaptionTimes?.length === state.captionCues.length + 1
+    ? [...state.audioCaptionTimes]
+    : null;
   return {
     format: 'roudoku-app-project',
     version: 1,
@@ -2311,7 +2448,8 @@ function currentSavedProject(): SavedProject {
     activeLayer: state.activeLayer,
     externalFiles,
     reviewMarkers: state.reviewMarkers.map(marker => ({ ...marker })),
-    reviewPanelOpen: !elements.scriptReviewBody.hidden
+    reviewPanelOpen: !elements.scriptReviewBody.hidden,
+    ...(savedCaptionTimes ? { captionTimeline: { scriptSource, times: savedCaptionTimes } } : {})
   };
 }
 
@@ -2476,7 +2614,9 @@ async function loadProject(file: File): Promise<void> {
   updateTtsEngine();
   updateScript();
   if (bundle) {
-    await loadAudio(bundle.audio.blob, bundle.audio.name, playbackScriptSource());
+    const scriptSource = playbackScriptSource();
+    const savedTimes = project.captionTimeline?.scriptSource === scriptSource ? project.captionTimeline.times : undefined;
+    await loadAudio(bundle.audio.blob, bundle.audio.name, scriptSource, savedTimes ? { times: savedTimes } : undefined);
   } else if (preservedAudio) {
     state.audioScriptSource = playbackScriptSource();
     state.audioCaptionTimes = null;
@@ -2840,7 +2980,7 @@ function speechRequest(text: string): { endpoint: string; body: Record<string, s
       };
 }
 
-async function fetchSpeech(text: string, signal: AbortSignal): Promise<{ blob: Blob; name: string }> {
+async function fetchSpeech(text: string, signal: AbortSignal): Promise<{ blob: Blob; name: string; timeline: SpeechTimelineChunk[] | null }> {
   const request = speechRequest(text);
   const response = await fetch(request.endpoint, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request.body), signal
@@ -2849,7 +2989,8 @@ async function fetchSpeech(text: string, signal: AbortSignal): Promise<{ blob: B
     const data = await response.json() as { error?: string; detail?: string };
     throw new Error(data.detail ?? data.error ?? '音声生成に失敗しました。');
   }
-  return { blob: await response.blob(), name: request.name };
+  const timeline = parseSpeechTimeline(response.headers.get('x-roudoku-timeline'));
+  return { blob: await response.blob(), name: request.name, timeline };
 }
 
 function stopPronunciationPreview(): void {
@@ -2958,7 +3099,7 @@ async function generateScriptVoice(): Promise<boolean> {
   try {
     const scriptSource = playbackScriptSource();
     const generated = await fetchSpeech(plainText(scriptSource), controller.signal);
-    await loadAudio(generated.blob, generated.name, scriptSource);
+    await loadAudio(generated.blob, generated.name, scriptSource, generated.timeline ? { chunks: generated.timeline } : undefined);
     return true;
   } catch (error) {
     if (!controller.signal.aborted) notify(errorMessage(error));
@@ -3051,12 +3192,18 @@ async function repairPronunciationAudio(): Promise<void> {
   elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の修正文を${forced ? '同じルビで強制' : ''}生成します。`;
   try {
     const replacements: Blob[] = [];
+    const replacementTimelines: Array<SpeechTimelineChunk[] | null> = [];
+    const replacementDurations: number[] = [];
     const replacementLabels: string[] = [];
     for (const [index, range] of ranges.entries()) {
       elements.repairPronunciationAudio.textContent = `修正文を生成中 ${index + 1}/${ranges.length}`;
       const text = afterCues.slice(range.from, range.to + 1).map(cue => cue.spoken).join('');
       replacementLabels.push(afterCues.slice(range.from, range.to + 1).map(cue => cue.text).join(''));
-      replacements.push((await fetchSpeech(text, controller.signal)).blob);
+      const generated = await fetchSpeech(text, controller.signal);
+      replacements.push(generated.blob);
+      replacementTimelines.push(generated.timeline);
+      const replacementBuffer = await (await ensureAudioContext()).decodeAudioData(await generated.blob.arrayBuffer());
+      replacementDurations.push(replacementBuffer.duration);
     }
     elements.repairPronunciationAudio.textContent = '元音声へ差し替え中…';
     const manifest = ranges.map((range, index) => ({
@@ -3077,7 +3224,36 @@ async function repairPronunciationAudio(): Promise<void> {
       const data = await response.json() as { error?: string; detail?: string };
       throw new Error(data.detail ?? data.error ?? '修正文を元音声へ差し替えられませんでした。');
     }
-    await loadAudio(await response.blob(), `${state.audioName.replace(/\.wav$/iu, '')}-読み修正版.wav`, currentSource);
+    let repairedTimes: number[] | undefined;
+    if (replacementTimelines.every((timeline): timeline is SpeechTimelineChunk[] => Boolean(timeline))) {
+      const merged = new Array<number>(afterCues.length + 1);
+      let shift = 0;
+      let cursor = 0;
+      let valid = true;
+      for (const [index, range] of ranges.entries()) {
+        for (let cueIndex = cursor; cueIndex <= range.from; cueIndex += 1) merged[cueIndex] = times[cueIndex]! + shift;
+        const localTimes = captionTimesFromSpeechTimeline(
+          afterCues.slice(range.from, range.to + 1),
+          replacementTimelines[index]!,
+          replacementDurations[index]!
+        );
+        if (!localTimes) { valid = false; break; }
+        const start = times[range.from]! + shift;
+        localTimes.forEach((time, localIndex) => { merged[range.from + localIndex] = start + time; });
+        shift += replacementDurations[index]! - (times[range.to + 1]! - times[range.from]!);
+        cursor = range.to + 1;
+      }
+      if (valid) {
+        for (let cueIndex = cursor; cueIndex <= afterCues.length; cueIndex += 1) merged[cueIndex] = times[cueIndex]! + shift;
+        repairedTimes = merged;
+      }
+    }
+    await loadAudio(
+      await response.blob(),
+      `${state.audioName.replace(/\.wav$/iu, '')}-読み修正版.wav`,
+      currentSource,
+      repairedTimes ? { times: repairedTimes } : undefined
+    );
     setRepairAudioPreviews(replacements.map((blob, index) => ({ label: replacementLabels[index]!, blob })));
     elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の音声を修正しました。必要なら音声を保存してください。`;
     notify(`${ranges.length}区間の音声を${forced ? '同じルビで再生成' : '修正'}しました。`, true);

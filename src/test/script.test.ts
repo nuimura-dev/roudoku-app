@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, plainText } from '../public/script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText } from '../public/script.js';
 
 test('表情タグ付き台本を解析する', () => {
   assert.deepEqual(parseScript('こんにちは。[happy]うれしい！[sad]でも少し残念。'), [
@@ -79,6 +79,14 @@ test('読点と句点の位置でリップシンクを休止する', () => {
   assert.equal(isPunctuationPause('a,b.', 0.9), true);
 });
 
+test('生成時チャンクを字幕の開始終了時刻へ変換する', () => {
+  const cues = captionCues('あいう、えお。');
+  const chunks = parseSpeechTimeline('4:2000,3:5000');
+  assert.ok(chunks);
+  assert.deepEqual(captionTimesFromSpeechTimeline(cues, chunks, 5), [0, 2, 5]);
+  assert.equal(parseSpeechTimeline('4:2000,bad'), null);
+});
+
 test('朗読字幕を句点ごとの区間へ分ける', () => {
   const cues = captionCues('風が吹いた。雲が流れていく！静かな夜。');
   assert.deepEqual(cues.map(cue => cue.text), ['風が吹いた。', '雲が流れていく！', '静かな夜。']);
@@ -96,9 +104,23 @@ test('読点の無音に合わせて字幕の表示時間を延ばす', () => {
   assert.equal(cues[0]?.weight, 22);
 });
 
-test('字幕途中の読点も音声の無音時間へ加算する', () => {
-  const cue = captionCues('洛中がその始末であるから、羅生門の修理などは、')[0]!;
-  assert.equal(cue.weight, [...'洛中がその始末であるから、羅生門の修理などは、'].length + 6);
+test('各読点の字幕へ音声の無音時間を加算する', () => {
+  const cues = captionCues('洛中がその始末であるから、羅生門の修理などは、');
+  assert.deepEqual(cues.map(cue => cue.text), ['洛中がその始末であるから、', '羅生門の修理などは、']);
+  assert.deepEqual(cues.map(cue => cue.weight), [
+    [...'洛中がその始末であるから、'].length + 3,
+    [...'羅生門の修理などは、'].length + 3
+  ]);
+});
+
+test('句読点直後の全角空白を音声と字幕で同じように扱う', () => {
+  const source = '振りして、いつでも大変な贅沢を言い、　その後も話は続く。';
+  assert.equal(plainText(source), '振りして、いつでも大変な贅沢を言い、その後も話は続く。');
+  assert.deepEqual(captionCues(source).map(cue => cue.spoken), [
+    '振りして、',
+    'いつでも大変な贅沢を言い、',
+    'その後も話は続く。'
+  ]);
 });
 
 test('段落間の連続改行を直前の字幕時間へ加算する', () => {
@@ -112,8 +134,18 @@ test('閉じかぎ括弧を直前の字幕へ含める', () => {
   assert.deepEqual(cues.map(cue => cue.text), ['「風が吹いた。」', '彼女は空を見た。']);
 });
 
-test('長い字幕は読みやすい長さで分割する', () => {
+test('無音のない長文を文字数だけでは分割しない', () => {
   const cues = captionCues('あ'.repeat(40) + '。');
-  assert.equal(cues.length, 2);
-  assert.ok(cues.every(cue => [...cue.text].length <= 34));
+  assert.deepEqual(cues.map(cue => cue.text), ['あ'.repeat(40) + '。']);
+});
+
+test('長文は実際に間ができる読点で分割する', () => {
+  const cues = captionCues('お礼を言わぬどころか、あの人は、私のこんな隠れた日々の苦労をも知らぬ振りして、いつでも大変な贅沢を言い、五つのパンと魚が二つ在るきりの時でさえ、');
+  assert.deepEqual(cues.map(cue => cue.text), [
+    'お礼を言わぬどころか、',
+    'あの人は、',
+    '私のこんな隠れた日々の苦労をも知らぬ振りして、',
+    'いつでも大変な贅沢を言い、',
+    '五つのパンと魚が二つ在るきりの時でさえ、'
+  ]);
 });

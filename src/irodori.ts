@@ -14,6 +14,11 @@ export interface IrodoriStreamChunk {
   audioBase64: string;
 }
 
+export interface IrodoriTimelineChunk {
+  chars: number;
+  endMs: number;
+}
+
 export interface IrodoriApiPayload {
   model: 'irodori-tts';
   input: string;
@@ -47,6 +52,32 @@ export function irodoriAttackFadeMs(value: unknown): number {
   const requested = Number(value);
   if (!Number.isFinite(requested)) return 40;
   return Math.round(Math.max(0, Math.min(120, requested)));
+}
+
+export function wavDurationSeconds(bytes: Uint8Array): number {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const fourCc = (offset: number): string => String.fromCharCode(
+    view.getUint8(offset), view.getUint8(offset + 1), view.getUint8(offset + 2), view.getUint8(offset + 3)
+  );
+  if (view.byteLength < 44 || fourCc(0) !== 'RIFF' || fourCc(8) !== 'WAVE') throw new Error('Irodori-TTSの音声チャンクがWAVではありません');
+  let cursor = 12;
+  let byteRate = 0;
+  while (cursor + 8 <= view.byteLength) {
+    const id = fourCc(cursor);
+    const size = view.getUint32(cursor + 4, true);
+    const content = cursor + 8;
+    if (id === 'fmt ' && size >= 16 && content + 16 <= view.byteLength) byteRate = view.getUint32(content + 8, true);
+    if (id === 'data') {
+      if (byteRate <= 0) throw new Error('Irodori-TTSのWAV形式を解析できません');
+      return Math.min(size, Math.max(0, view.byteLength - content)) / byteRate;
+    }
+    cursor = content + size + size % 2;
+  }
+  throw new Error('Irodori-TTSのWAV音声データを解析できません');
+}
+
+export function encodeIrodoriTimeline(chunks: readonly IrodoriTimelineChunk[]): string {
+  return chunks.map(chunk => `${chunk.chars}:${chunk.endMs}`).join(',');
 }
 
 export function parseIrodoriSse(value: string): IrodoriStreamChunk[] {
