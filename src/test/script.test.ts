@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText } from '../public/script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange } from '../public/script.js';
 
 test('表情タグ付き台本を解析する', () => {
   assert.deepEqual(parseScript('こんにちは。[happy]うれしい！[sad]でも少し残念。'), [
@@ -85,6 +85,17 @@ test('生成時チャンクを字幕の開始終了時刻へ変換する', () =>
   assert.ok(chunks);
   assert.deepEqual(captionTimesFromSpeechTimeline(cues, chunks, 5), [0, 2, 5]);
   assert.equal(parseSpeechTimeline('4:2000,bad'), null);
+});
+
+test('一文の差し替え時間を後続字幕へ反映する', () => {
+  assert.deepEqual(
+    replaceCaptionTimeRange([0, 2, 5, 9], 1, 1, [0, 4]),
+    [0, 2, 6, 10]
+  );
+  assert.deepEqual(
+    replaceCaptionTimeRange([0, 2, 5, 9], 1, 2, [0, 1, 5]),
+    [0, 2, 3, 7]
+  );
 });
 
 test('朗読字幕を句点ごとの区間へ分ける', () => {

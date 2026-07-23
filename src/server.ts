@@ -449,6 +449,34 @@ async function declickAudio(req: IncomingMessage, res: ServerResponse): Promise<
   }
 }
 
+async function deessAudio(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'roudoku-audio-deess-'));
+  const input = join(dir, 'original-audio');
+  const output = join(dir, 'deessed.wav');
+  const clientAbort = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) clientAbort.abort(); });
+  try {
+    await requestToFile(req, input, maxVideoUpload);
+    const source = await stat(input);
+    if (source.size < 44) throw new Error('音声データがありません');
+    await run('ffmpeg', [
+      '-y', '-i', input, '-vn',
+      // 歯擦音だけを控えめに圧縮し、子音の明瞭さと声色をできるだけ維持する。
+      '-af', 'deesser=i=0.35:m=0.5:f=0.5',
+      '-ar', '48000', '-c:a', 'pcm_s16le', output
+    ], clientAbort.signal);
+    const audio = await stat(output);
+    res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': audio.size });
+    await pipeline(createReadStream(output), res);
+  } catch (error) {
+    if (!clientAbort.signal.aborted && !res.destroyed && !res.headersSent) {
+      json(res, 500, { error: 'サ行ノイズを軽減できませんでした', detail: errorMessage(error) });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function staticFile(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const urlPath = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
   const requestedFile = urlPath === '/' ? 'index.html' : decodeURIComponent(urlPath.slice(1));
@@ -480,6 +508,7 @@ createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/api/export') return await convert(req, res);
     if (req.method === 'POST' && req.url === '/api/audio/repair') return await repairAudio(req, res);
     if (req.method === 'POST' && req.url === '/api/audio/declick') return await declickAudio(req, res);
+    if (req.method === 'POST' && req.url === '/api/audio/deess') return await deessAudio(req, res);
     if (req.method === 'GET' && req.url === '/api/irodori/health') return await irodoriHealth(res);
     if (req.method === 'GET') return await staticFile(req, res);
     json(res, 405, { error: 'Method not allowed' });

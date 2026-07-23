@@ -1,4 +1,4 @@
-import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, type ActiveCaption, type CaptionCue, type Expression, type SpeechTimelineChunk } from './script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, type ActiveCaption, type CaptionCue, type Expression, type SpeechTimelineChunk } from './script.js';
 import { matchNearestTimelineAnchors, matchTimelineAnchors } from './alignment.js';
 import { createProjectBundle, maxProjectBundleBytes, readProjectBundle } from './project-bundle.js';
 
@@ -185,6 +185,8 @@ const elements = {
   saveAudioFromScript: required<HTMLButtonElement>('#saveAudioFromScript'),
   declickAudio: required<HTMLButtonElement>('#declickAudio'),
   declickAudioFromScript: required<HTMLButtonElement>('#declickAudioFromScript'),
+  deessAudio: required<HTMLButtonElement>('#deessAudio'),
+  deessAudioFromScript: required<HTMLButtonElement>('#deessAudioFromScript'),
   cancelVoice: required<HTMLButtonElement>('#cancelVoice'),
   cancelVoiceFromScript: required<HTMLButtonElement>('#cancelVoiceFromScript'),
   saveProject: required<HTMLButtonElement>('#saveProject'),
@@ -247,7 +249,12 @@ let pronunciationPreviewController: AbortController | null = null;
 let pronunciationPreviewAudio: HTMLAudioElement | null = null;
 let pronunciationPreviewUrl: string | null = null;
 let pronunciationPreviewButton: HTMLButtonElement | null = null;
-let repairPreviewClips: Array<{ label: string; blob: Blob }> = [];
+interface RepairPreviewClip {
+  label: string;
+  blob: Blob;
+  cueIndex: number;
+}
+let repairPreviewClips: RepairPreviewClip[] = [];
 const reviewPreviewClips = new Map<string, { blob: Blob; spoken: string }>();
 let reviewBusyMarkerId: string | null = null;
 let reviewBusyAction: 'generate' | 'apply' | null = null;
@@ -257,6 +264,7 @@ let exportController: AbortController | null = null;
 let exportCancelled = false;
 let combinedWorkflowRunning = false;
 let declickAudioRunning = false;
+let deessAudioRunning = false;
 const expressionTransitionDuration = .42;
 const colors: Record<Expression, string> = {
   neutral: '#a6a39c', happy: '#d8ff45', sad: '#70a7ff', angry: '#ff6b53', surprised: '#d994ff'
@@ -1356,9 +1364,18 @@ async function applyReviewMarkerAudio(marker: ReviewMarker): Promise<void> {
   reviewBusyAction = 'apply';
   setVoiceGenerationState(true);
   try {
+    const sourceTimes = [...state.audioCaptionTimes];
+    const replacementBuffer = await (await ensureAudioContext()).decodeAudioData(await replacement.arrayBuffer());
+    const repairedTimes = replaceCaptionTimeRange(
+      sourceTimes,
+      current.index,
+      current.index,
+      [0, replacementBuffer.duration]
+    );
+    if (!repairedTimes) throw new Error('差し替え後の字幕タイムラインを作成できませんでした。');
     const manifest = [{
-      start: state.audioCaptionTimes[current.index]!,
-      end: state.audioCaptionTimes[current.index + 1]!,
+      start: sourceTimes[current.index]!,
+      end: sourceTimes[current.index + 1]!,
       size: replacement.size
     }];
     const response = await fetch('/api/audio/repair', {
@@ -1374,8 +1391,13 @@ async function applyReviewMarkerAudio(marker: ReviewMarker): Promise<void> {
       const data = await response.json() as { error?: string; detail?: string };
       throw new Error(data.detail ?? data.error ?? '再生成した文を元音声へ反映できませんでした。');
     }
-    await loadAudio(await response.blob(), `${state.audioName.replace(/\.wav$/iu, '')}-部分修正版.wav`, currentSource);
-    setRepairAudioPreviews([{ label: current.cue.text, blob: replacement }]);
+    await loadAudio(
+      await response.blob(),
+      `${state.audioName.replace(/\.wav$/iu, '')}-部分修正版.wav`,
+      currentSource,
+      { times: repairedTimes }
+    );
+    setRepairAudioPreviews([{ label: current.cue.text, blob: replacement, cueIndex: current.index }]);
     notify('確認した文の音声を本編へ反映しました。', true);
   } catch (error) {
     if (!controller.signal.aborted) notify(errorMessage(error));
@@ -1815,6 +1837,8 @@ function clearNarrationAudio(): void {
   elements.saveAudioFromScript.disabled = true;
   elements.declickAudio.disabled = true;
   elements.declickAudioFromScript.disabled = true;
+  elements.deessAudio.disabled = true;
+  elements.deessAudioFromScript.disabled = true;
 }
 
 function resetPlaybackPosition(): void {
@@ -1876,6 +1900,8 @@ async function loadLongAudio(blob: Blob, name: string, scriptSource: string, tim
     elements.saveAudioFromScript.disabled = false;
     elements.declickAudio.disabled = false;
     elements.declickAudioFromScript.disabled = false;
+    elements.deessAudio.disabled = false;
+    elements.deessAudioFromScript.disabled = false;
     elements.audioName.textContent = `${name} · ${formatTime(audio.duration)} · 長編省メモリ`;
     const hasKnownTiming = applyKnownCaptionTiming(audio.duration, timing);
     notify(hasKnownTiming
@@ -1956,6 +1982,8 @@ async function loadAudio(blob: Blob, name: string, scriptSource = playbackScript
     elements.saveAudioFromScript.disabled = false;
     elements.declickAudio.disabled = false;
     elements.declickAudioFromScript.disabled = false;
+    elements.deessAudio.disabled = false;
+    elements.deessAudioFromScript.disabled = false;
     elements.audioName.textContent = `${name} · ${formatTime(buffer.duration)}`;
     const hasKnownTiming = applyKnownCaptionTiming(buffer.duration, timing);
     notify(hasKnownTiming
@@ -2889,9 +2917,12 @@ function setVoiceGenerationState(generating: boolean): void {
   elements.generateVoiceFromScript.disabled = generating;
   elements.generateVoiceAndExport.disabled = generating || combinedWorkflowRunning;
   elements.repairPronunciationAudio.disabled = generating;
-  const canDeclick = Boolean(state.audioBlob) && !generating && !declickAudioRunning;
-  elements.declickAudio.disabled = !canDeclick;
-  elements.declickAudioFromScript.disabled = !canDeclick;
+  const audioCleanupRunning = declickAudioRunning || deessAudioRunning;
+  const canCleanAudio = Boolean(state.audioBlob) && !generating && !audioCleanupRunning;
+  elements.declickAudio.disabled = !canCleanAudio;
+  elements.declickAudioFromScript.disabled = !canCleanAudio;
+  elements.deessAudio.disabled = !canCleanAudio;
+  elements.deessAudioFromScript.disabled = !canCleanAudio;
   elements.generateVoice.textContent = generating ? '音声を生成中…' : '台本から音声を生成';
   elements.generateVoiceFromScript.textContent = generating ? '音声を生成中…' : '音声を生成';
   elements.cancelVoice.hidden = !generating;
@@ -2904,13 +2935,16 @@ function setVoiceGenerationState(generating: boolean): void {
 async function removeNarrationClicks(): Promise<void> {
   const source = state.audioBlob;
   if (!source) { notify('先に音声を生成または読み込んでください。'); return; }
-  if (declickAudioRunning || voiceGenerationController || state.exporting) return;
+  if (declickAudioRunning || deessAudioRunning || voiceGenerationController || state.exporting) return;
   if (state.playing) stopPlayback(true);
   const sourceName = state.audioName;
   const sourceScript = state.audioScriptSource ?? playbackScriptSource();
+  const sourceTimes = state.audioCaptionTimes ? [...state.audioCaptionTimes] : undefined;
   declickAudioRunning = true;
   elements.declickAudio.disabled = true;
   elements.declickAudioFromScript.disabled = true;
+  elements.deessAudio.disabled = true;
+  elements.deessAudioFromScript.disabled = true;
   elements.declickAudio.textContent = 'ノイズ除去中…';
   elements.declickAudioFromScript.textContent = 'ノイズ除去中…';
   elements.statusText.textContent = 'パチパチノイズ除去中';
@@ -2927,7 +2961,7 @@ async function removeNarrationClicks(): Promise<void> {
     }
     const cleaned = await response.blob();
     const baseName = sourceName.replace(/\.[^.]+$/u, '') || '朗読音声';
-    await loadAudio(cleaned, `${baseName}-ノイズ除去済み.wav`, sourceScript);
+    await loadAudio(cleaned, `${baseName}-ノイズ除去済み.wav`, sourceScript, sourceTimes ? { times: sourceTimes } : undefined);
     notify('パチパチノイズを除去しました。試聴後、「音声を保存」で別ファイルとして保存できます。', true);
   } catch (error) {
     notify(errorMessage(error));
@@ -2938,6 +2972,54 @@ async function removeNarrationClicks(): Promise<void> {
     const canDeclick = Boolean(state.audioBlob);
     elements.declickAudio.disabled = !canDeclick;
     elements.declickAudioFromScript.disabled = !canDeclick;
+    elements.deessAudio.disabled = !canDeclick;
+    elements.deessAudioFromScript.disabled = !canDeclick;
+    if (!state.playing && !state.exporting) elements.statusText.textContent = '準備完了';
+  }
+}
+
+async function reduceNarrationSibilance(): Promise<void> {
+  const source = state.audioBlob;
+  if (!source) { notify('先に音声を生成または読み込んでください。'); return; }
+  if (deessAudioRunning || declickAudioRunning || voiceGenerationController || state.exporting) return;
+  if (state.playing) stopPlayback(true);
+  const sourceName = state.audioName;
+  const sourceScript = state.audioScriptSource ?? playbackScriptSource();
+  const sourceTimes = state.audioCaptionTimes ? [...state.audioCaptionTimes] : undefined;
+  deessAudioRunning = true;
+  elements.deessAudio.disabled = true;
+  elements.deessAudioFromScript.disabled = true;
+  elements.declickAudio.disabled = true;
+  elements.declickAudioFromScript.disabled = true;
+  elements.deessAudio.textContent = 'サ行を処理中…';
+  elements.deessAudioFromScript.textContent = 'サ行を処理中…';
+  elements.statusText.textContent = 'サ行ノイズ軽減中';
+  notify('サ行の強い高周波成分を検出して軽減しています…', true);
+  try {
+    const response = await fetch('/api/audio/deess', {
+      method: 'POST',
+      headers: { 'content-type': source.type || 'application/octet-stream' },
+      body: source
+    });
+    if (!response.ok) {
+      const data = await response.json() as { error?: string; detail?: string };
+      throw new Error(data.detail ?? data.error ?? 'サ行ノイズを軽減できませんでした。');
+    }
+    const cleaned = await response.blob();
+    const baseName = sourceName.replace(/\.[^.]+$/u, '') || '朗読音声';
+    await loadAudio(cleaned, `${baseName}-サ行ノイズ軽減済み.wav`, sourceScript, sourceTimes ? { times: sourceTimes } : undefined);
+    notify('サ行ノイズを軽減しました。試聴後、「音声を保存」で別ファイルとして保存できます。', true);
+  } catch (error) {
+    notify(errorMessage(error));
+  } finally {
+    deessAudioRunning = false;
+    elements.deessAudio.textContent = 'サ行ノイズ軽減';
+    elements.deessAudioFromScript.textContent = 'サ行ノイズ軽減';
+    const canCleanAudio = Boolean(state.audioBlob);
+    elements.deessAudio.disabled = !canCleanAudio;
+    elements.deessAudioFromScript.disabled = !canCleanAudio;
+    elements.declickAudio.disabled = !canCleanAudio;
+    elements.declickAudioFromScript.disabled = !canCleanAudio;
     if (!state.playing && !state.exporting) elements.statusText.textContent = '準備完了';
   }
 }
@@ -3082,12 +3164,30 @@ function clearRepairAudioPreviews(): void {
   elements.repairAudioPreviewList.replaceChildren();
 }
 
-function setRepairAudioPreviews(clips: Array<{ label: string; blob: Blob }>): void {
+function setRepairAudioPreviews(clips: RepairPreviewClip[]): void {
   repairPreviewClips = clips;
   elements.repairAudioPreview.hidden = clips.length === 0;
-  elements.repairAudioPreviewList.replaceChildren(...clips.map((clip, index) =>
-    pronunciationPreviewRow(`修正${index + 1}`, clip.label, '差し替え文を試聴', button => playPronunciationPreview(clip.blob, button))
-  ));
+  elements.repairAudioPreviewList.replaceChildren(...clips.map((clip, index) => {
+    const row = document.createElement('div');
+    row.className = 'pronunciation-preview-row repair-preview-row';
+    const seek = document.createElement('button');
+    seek.type = 'button';
+    seek.className = 'repair-preview-seek';
+    seek.title = '本編プレビューをこの文の開始位置へ移動';
+    const time = document.createElement('time');
+    time.textContent = formatReviewTime(cueOverallStart(clip.cueIndex));
+    const text = document.createElement('span');
+    text.textContent = `修正${index + 1} · ${clip.label}`;
+    seek.append(time, text);
+    seek.addEventListener('click', () => seekToReviewCue(clip.cueIndex));
+    const play = document.createElement('button');
+    play.type = 'button';
+    play.dataset.label = '差し替え文を試聴';
+    play.textContent = '差し替え文を試聴';
+    play.addEventListener('click', () => playPronunciationPreview(clip.blob, play));
+    row.append(seek, play);
+    return row;
+  }));
 }
 
 async function generateScriptVoice(): Promise<boolean> {
@@ -3192,18 +3292,21 @@ async function repairPronunciationAudio(): Promise<void> {
   elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の修正文を${forced ? '同じルビで強制' : ''}生成します。`;
   try {
     const replacements: Blob[] = [];
-    const replacementTimelines: Array<SpeechTimelineChunk[] | null> = [];
-    const replacementDurations: number[] = [];
+    const replacementCaptionTimes: number[][] = [];
     const replacementLabels: string[] = [];
     for (const [index, range] of ranges.entries()) {
       elements.repairPronunciationAudio.textContent = `修正文を生成中 ${index + 1}/${ranges.length}`;
-      const text = afterCues.slice(range.from, range.to + 1).map(cue => cue.spoken).join('');
-      replacementLabels.push(afterCues.slice(range.from, range.to + 1).map(cue => cue.text).join(''));
+      const localCues = afterCues.slice(range.from, range.to + 1);
+      const text = localCues.map(cue => cue.spoken).join('');
+      replacementLabels.push(localCues.map(cue => cue.text).join(''));
       const generated = await fetchSpeech(text, controller.signal);
       replacements.push(generated.blob);
-      replacementTimelines.push(generated.timeline);
       const replacementBuffer = await (await ensureAudioContext()).decodeAudioData(await generated.blob.arrayBuffer());
-      replacementDurations.push(replacementBuffer.duration);
+      const localTimes = generated.timeline
+        ? captionTimesFromSpeechTimeline(localCues, generated.timeline, replacementBuffer.duration)
+        : await alignCaptionTimes(replacementBuffer, localCues);
+      if (!localTimes) throw new Error(`修正区間${index + 1}の字幕タイムラインを作成できませんでした。`);
+      replacementCaptionTimes.push(localTimes);
     }
     elements.repairPronunciationAudio.textContent = '元音声へ差し替え中…';
     const manifest = ranges.map((range, index) => ({
@@ -3224,37 +3327,23 @@ async function repairPronunciationAudio(): Promise<void> {
       const data = await response.json() as { error?: string; detail?: string };
       throw new Error(data.detail ?? data.error ?? '修正文を元音声へ差し替えられませんでした。');
     }
-    let repairedTimes: number[] | undefined;
-    if (replacementTimelines.every((timeline): timeline is SpeechTimelineChunk[] => Boolean(timeline))) {
-      const merged = new Array<number>(afterCues.length + 1);
-      let shift = 0;
-      let cursor = 0;
-      let valid = true;
-      for (const [index, range] of ranges.entries()) {
-        for (let cueIndex = cursor; cueIndex <= range.from; cueIndex += 1) merged[cueIndex] = times[cueIndex]! + shift;
-        const localTimes = captionTimesFromSpeechTimeline(
-          afterCues.slice(range.from, range.to + 1),
-          replacementTimelines[index]!,
-          replacementDurations[index]!
-        );
-        if (!localTimes) { valid = false; break; }
-        const start = times[range.from]! + shift;
-        localTimes.forEach((time, localIndex) => { merged[range.from + localIndex] = start + time; });
-        shift += replacementDurations[index]! - (times[range.to + 1]! - times[range.from]!);
-        cursor = range.to + 1;
-      }
-      if (valid) {
-        for (let cueIndex = cursor; cueIndex <= afterCues.length; cueIndex += 1) merged[cueIndex] = times[cueIndex]! + shift;
-        repairedTimes = merged;
-      }
+    let repairedTimes = [...times];
+    for (const [index, range] of ranges.entries()) {
+      const merged = replaceCaptionTimeRange(repairedTimes, range.from, range.to, replacementCaptionTimes[index]!);
+      if (!merged) throw new Error(`修正区間${index + 1}を本編タイムラインへ統合できませんでした。`);
+      repairedTimes = merged;
     }
     await loadAudio(
       await response.blob(),
       `${state.audioName.replace(/\.wav$/iu, '')}-読み修正版.wav`,
       currentSource,
-      repairedTimes ? { times: repairedTimes } : undefined
+      { times: repairedTimes }
     );
-    setRepairAudioPreviews(replacements.map((blob, index) => ({ label: replacementLabels[index]!, blob })));
+    setRepairAudioPreviews(replacements.map((blob, index) => ({
+      label: replacementLabels[index]!,
+      blob,
+      cueIndex: ranges[index]!.from
+    })));
     elements.pronunciationRepairStatus.textContent = `${ranges.length}区間の音声を修正しました。必要なら音声を保存してください。`;
     notify(`${ranges.length}区間の音声を${forced ? '同じルビで再生成' : '修正'}しました。`, true);
   } catch (error) {
@@ -3299,6 +3388,8 @@ elements.saveAudio.addEventListener('click', saveNarrationAudio);
 elements.saveAudioFromScript.addEventListener('click', saveNarrationAudio);
 elements.declickAudio.addEventListener('click', () => { void removeNarrationClicks(); });
 elements.declickAudioFromScript.addEventListener('click', () => { void removeNarrationClicks(); });
+elements.deessAudio.addEventListener('click', () => { void reduceNarrationSibilance(); });
+elements.deessAudioFromScript.addEventListener('click', () => { void reduceNarrationSibilance(); });
 elements.cancelVoice.addEventListener('click', cancelVoiceGeneration);
 elements.cancelVoiceFromScript.addEventListener('click', cancelVoiceGeneration);
 

@@ -226,6 +226,26 @@ export function captionTimesFromSpeechTimeline(
     : null;
 }
 
+export function replaceCaptionTimeRange(
+  times: readonly number[],
+  fromCue: number,
+  toCue: number,
+  replacementTimes: readonly number[]
+): number[] | null {
+  if (!Number.isInteger(fromCue) || !Number.isInteger(toCue) || fromCue < 0 || toCue < fromCue || toCue + 1 >= times.length) return null;
+  if (replacementTimes.length !== toCue - fromCue + 2 || replacementTimes[0] !== 0) return null;
+  if (!times.every((time, index) => Number.isFinite(time) && time >= 0 && (index === 0 || time >= times[index - 1]!))) return null;
+  if (!replacementTimes.every((time, index) => Number.isFinite(time) && time >= 0 && (index === 0 || time >= replacementTimes[index - 1]!))) return null;
+  const result = [...times];
+  const start = times[fromCue]!;
+  replacementTimes.forEach((time, index) => { result[fromCue + index] = start + time; });
+  const oldDuration = times[toCue + 1]! - start;
+  const newDuration = replacementTimes.at(-1)!;
+  const shift = newDuration - oldDuration;
+  for (let index = toCue + 2; index < result.length; index += 1) result[index] = times[index]! + shift;
+  return result;
+}
+
 export function activeCaption(cues: readonly CaptionCue[], progress: number): ActiveCaption | null {
   if (cues.length === 0) return null;
   const total = cues.reduce((sum, cue) => sum + cue.weight, 0);

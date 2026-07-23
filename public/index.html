@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>朗読娘 — キャラクター動画スタジオ</title>
-  <link rel="stylesheet" href="/style.css?v=20260722-0001">
+  <link rel="stylesheet" href="/style.css?v=20260722-0002">
 </head>
 <body>
   <header class="topbar">
@@ -104,7 +104,7 @@
         </div>
         <div class="script-voice-actions">
           <div><strong>この台本から音声を生成</strong><small>音声タブの声・速度・品質設定を使用します</small></div>
-          <div class="generation-actions"><button id="generateVoiceFromScript" type="button">音声を生成</button><button class="secondary-action" id="generateVoiceAndExport" type="button">音声生成 → MP4</button><button class="save-audio-action" id="saveAudioFromScript" type="button" disabled>音声を保存</button><button class="secondary-action" id="declickAudioFromScript" type="button" disabled>パチパチノイズ除去</button><button class="cancel-action" id="cancelVoiceFromScript" type="button" hidden>中止</button></div>
+          <div class="generation-actions"><button id="generateVoiceFromScript" type="button">音声を生成</button><button class="secondary-action" id="generateVoiceAndExport" type="button">音声生成 → MP4</button><button class="save-audio-action" id="saveAudioFromScript" type="button" disabled>音声を保存</button><button class="secondary-action" id="declickAudioFromScript" type="button" disabled>パチパチノイズ除去</button><button class="secondary-action" id="deessAudioFromScript" type="button" disabled>サ行ノイズ軽減</button><button class="cancel-action" id="cancelVoiceFromScript" type="button" hidden>中止</button></div>
           <label class="caption-toggle">朗読中の文章を画面に表示 <input id="showCaptions" type="checkbox" checked></label>
           <label class="caption-effect">字幕エフェクト
             <select id="captionEffect"><option value="wind">風フェード</option><option value="twist">黒文字・斜めツイスト</option><option value="fixed-panel" selected>白い固定パネル・先読み</option></select>
@@ -193,7 +193,7 @@
             <small>自分で使用許可を持つ音声だけを登録してください。</small>
           </div>
           <label>速度 <input id="voiceSpeed" type="range" value="1.25" min="0.5" max="2" step="0.05"><output id="voiceSpeedOut">1.25×</output></label>
-          <div class="voice-generation-actions"><button id="generateVoice">台本から音声を生成</button><button class="save-audio-action" id="saveAudio" type="button" disabled>音声を保存</button><button class="secondary-action" id="declickAudio" type="button" disabled>パチパチノイズ除去</button><button class="cancel-action" id="cancelVoice" type="button" hidden>音声生成を中止</button></div>
+          <div class="voice-generation-actions"><button id="generateVoice">台本から音声を生成</button><button class="save-audio-action" id="saveAudio" type="button" disabled>音声を保存</button><button class="secondary-action" id="declickAudio" type="button" disabled>パチパチノイズ除去</button><button class="secondary-action" id="deessAudio" type="button" disabled>サ行ノイズ軽減</button><button class="cancel-action" id="cancelVoice" type="button" hidden>音声生成を中止</button></div>
         </div>
         <div class="or"><span>または</span></div>
         <label class="upload">
@@ -239,6 +239,6 @@
     </aside>
   </main>
 
-  <script type="module" src="/app.js?v=20260722-0003"></script>
+  <script type="module" src="/app.js?v=20260722-0007"></script>
 </body>
 </html>
