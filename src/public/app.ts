@@ -34,6 +34,7 @@ interface PlaybackSession {
   openingDuration: number;
   narrationDuration: number;
   endingDuration: number;
+  playbackRate: number;
   source?: AudioBufferSourceNode;
   narrationGain?: GainNode;
   mediaStartTimer?: number;
@@ -175,6 +176,7 @@ const elements = {
   emptyStage: required<HTMLElement>('#emptyStage'),
   statusText: required<HTMLElement>('#statusText'),
   playButton: required<HTMLButtonElement>('#playButton'),
+  previewSpeed: required<HTMLSelectElement>('#previewSpeed'),
   rewind: required<HTMLButtonElement>('#rewind'),
   exportButton: required<HTMLButtonElement>('#exportButton'),
   cancelExport: required<HTMLButtonElement>('#cancelExport'),
@@ -201,6 +203,7 @@ const elements = {
   scriptReviewBody: required<HTMLElement>('#scriptReviewBody'),
   toggleScriptReview: required<HTMLButtonElement>('#toggleScriptReview'),
   reviewPosition: required<HTMLElement>('#reviewPosition'),
+  reviewSearch: required<HTMLInputElement>('#reviewSearch'),
   reviewMarkerCount: required<HTMLElement>('#reviewMarkerCount'),
   reviewContext: required<HTMLElement>('#reviewContext'),
   reviewNote: required<HTMLInputElement>('#reviewNote'),
@@ -1465,9 +1468,12 @@ function renderReviewMarkers(): void {
 function renderScriptReview(force = false): void {
   const active = reviewCaptionForPlayback();
   const activeIndex = active?.index ?? -1;
+  const searchQuery = elements.reviewSearch.value.trim().toLocaleLowerCase('ja');
   elements.markReviewIssue.disabled = activeIndex < 0;
   elements.reviewPosition.textContent = captionAlignmentPending
     ? '字幕タイミングを解析中…'
+    : searchQuery
+    ? `「${elements.reviewSearch.value.trim()}」の検索結果`
     : active
     ? `${formatReviewTime(state.playbackElapsed)} · ${activeIndex + 1} / ${state.captionCues.length}`
     : state.playbackElapsed < openingCardDuration() ? '冒頭カード' : '本文外';
@@ -1478,6 +1484,32 @@ function renderScriptReview(force = false): void {
     empty.className = 'review-empty';
     empty.textContent = '台本を入力すると、再生中の文章がここに表示されます。';
     elements.reviewContext.replaceChildren(empty);
+    return;
+  }
+  if (searchQuery) {
+    const matches = state.captionCues.flatMap((cue, index) => {
+      const searchable = `${cue.text}\n${cue.spoken}`.toLocaleLowerCase('ja');
+      return searchable.includes(searchQuery) ? [{ cue, index }] : [];
+    });
+    if (!matches.length) {
+      const empty = document.createElement('div');
+      empty.className = 'review-empty';
+      empty.textContent = '一致する文章がありません。';
+      elements.reviewContext.replaceChildren(empty);
+      return;
+    }
+    elements.reviewContext.replaceChildren(...matches.map(({ cue, index }) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = `review-cue${index === activeIndex ? ' current' : ''}`;
+      row.dataset.reviewCueIndex = String(index);
+      const time = document.createElement('time');
+      time.textContent = formatReviewTime(cueOverallStart(index));
+      const text = document.createElement('span');
+      appendReviewCueText(text, cue);
+      row.append(time, text);
+      return row;
+    }));
     return;
   }
   const visibleCueCount = 9;
@@ -2135,7 +2167,7 @@ function updatePlaybackPosition(elapsed: number, total = duration()): void {
 
 function animationLoop(session: PlaybackSession, start: number, analyser: AnalyserNode | null, data: Uint8Array<ArrayBuffer> | null): void {
   const now = audioContext?.currentTime ?? performance.now() / 1000;
-  const clockElapsed = Math.min(session.duration, Math.max(0, session.startOffset + now - start));
+  const clockElapsed = Math.min(session.duration, Math.max(0, session.startOffset + (now - start) * session.playbackRate));
   const media = state.audioElement;
   // 長編省メモリ再生ではHTMLMediaElementとAudioContextが別々の時計で進む。
   // 実音声のcurrentTimeを正として、長時間再生時の字幕・台本チェックのずれを防ぐ。
@@ -2186,6 +2218,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   const narration = narrationDuration();
   const ending = endingCardDuration();
   const total = opening + narration + ending;
+  const playbackRate = record ? 1 : Math.max(1, Math.min(2, Number(elements.previewSpeed.value) || 1));
   const startOffset = record || state.overallProgress >= .999
     ? 0
     : Math.max(0, Math.min(total, state.playbackElapsed));
@@ -2195,7 +2228,8 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
     startOffset,
     openingDuration: opening,
     narrationDuration: narration,
-    endingDuration: ending
+    endingDuration: ending,
+    playbackRate
   };
   state.session = session; state.playing = true; state.exporting = record;
   updatePlaybackPosition(startOffset, total);
@@ -2221,6 +2255,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   }
   if (state.audioBuffer) {
     session.source = ac.createBufferSource(); session.source.buffer = state.audioBuffer;
+    session.source.playbackRate.value = playbackRate;
     analyser = ac.createAnalyser(); analyser.fftSize = 512; data = new Uint8Array(analyser.fftSize);
     session.narrationGain = ac.createGain();
     session.source.connect(analyser); analyser.connect(session.narrationGain); session.narrationGain.connect(ac.destination);
@@ -2238,6 +2273,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   if (state.bgmBuffer) {
     session.bgmSource = ac.createBufferSource();
     session.bgmSource.buffer = state.bgmBuffer;
+    session.bgmSource.playbackRate.value = playbackRate;
     session.bgmSource.loop = elements.bgmLoop.checked;
     session.bgmGain = ac.createGain();
     session.bgmSource.connect(session.bgmGain);
@@ -2247,6 +2283,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   if (state.ambientBuffer) {
     session.ambientSource = ac.createBufferSource();
     session.ambientSource.buffer = state.ambientBuffer;
+    session.ambientSource.playbackRate.value = playbackRate;
     session.ambientSource.loop = elements.ambientLoop.checked;
     session.ambientGain = ac.createGain();
     session.ambientSource.connect(session.ambientGain);
@@ -2280,6 +2317,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
 
   const start = ac.currentTime;
   const remainingDuration = Math.max(0, session.duration - session.startOffset);
+  const remainingWallDuration = remainingDuration / playbackRate;
   if (session.narrationGain) {
     // 途中のサンプルから再生すると波形が不連続になり、開始時だけクリック音が出る。
     // 約25msだけ滑らかに立ち上げ・収束させ、本文中の音量や音質は維持する。
@@ -2289,9 +2327,9 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
       session.narrationDuration - narrationOffset,
       remainingDuration - narrationDelay
     ));
-    const narrationStart = start + narrationDelay;
-    const narrationEnd = narrationStart + playableNarration;
-    const edgeFade = Math.min(.025, playableNarration / 3);
+    const narrationStart = start + narrationDelay / playbackRate;
+    const narrationEnd = narrationStart + playableNarration / playbackRate;
+    const edgeFade = Math.min(.025, playableNarration / playbackRate / 3);
     session.narrationGain.gain.setValueAtTime(0, start);
     session.narrationGain.gain.setValueAtTime(0, narrationStart);
     if (playableNarration > 0) {
@@ -2302,19 +2340,19 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   }
   if (session.bgmGain) {
     const volume = Number(elements.bgmVolume.value) / 100;
-    const fade = Math.min(1, remainingDuration / 4);
+    const fade = Math.min(1, remainingWallDuration / 4);
     session.bgmGain.gain.setValueAtTime(0, start);
     session.bgmGain.gain.linearRampToValueAtTime(volume, start + fade);
-    session.bgmGain.gain.setValueAtTime(volume, Math.max(start + fade, start + remainingDuration - fade));
-    session.bgmGain.gain.linearRampToValueAtTime(0, start + remainingDuration);
+    session.bgmGain.gain.setValueAtTime(volume, Math.max(start + fade, start + remainingWallDuration - fade));
+    session.bgmGain.gain.linearRampToValueAtTime(0, start + remainingWallDuration);
   }
   if (session.ambientGain) {
     const volume = Number(elements.ambientVolume.value) / 100;
-    const fade = Math.min(2, remainingDuration / 4);
+    const fade = Math.min(2, remainingWallDuration / 4);
     session.ambientGain.gain.setValueAtTime(0, start);
     session.ambientGain.gain.linearRampToValueAtTime(volume, start + fade);
-    session.ambientGain.gain.setValueAtTime(volume, Math.max(start + fade, start + remainingDuration - fade));
-    session.ambientGain.gain.linearRampToValueAtTime(0, start + remainingDuration);
+    session.ambientGain.gain.setValueAtTime(volume, Math.max(start + fade, start + remainingWallDuration - fade));
+    session.ambientGain.gain.linearRampToValueAtTime(0, start + remainingWallDuration);
   }
   animationLoop(session, start, analyser, data);
   if (session.renderWorker) {
@@ -2326,13 +2364,14 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   if (session.source && session.startOffset < session.openingDuration + session.narrationDuration) {
     const delay = Math.max(0, session.openingDuration - session.startOffset);
     const audioOffset = Math.max(0, session.startOffset - session.openingDuration);
-    session.source.start(start + delay, audioOffset);
+    session.source.start(start + delay / playbackRate, audioOffset);
   }
   if (state.audioElement && session.startOffset < session.openingDuration + session.narrationDuration) {
     const delay = Math.max(0, session.openingDuration - session.startOffset);
     state.audioElement.currentTime = Math.max(0, session.startOffset - session.openingDuration);
+    state.audioElement.playbackRate = playbackRate;
     const playMedia = (): void => { void state.audioElement?.play().catch(error => notify(`長編音声を再生できませんでした: ${errorMessage(error)}`)); };
-    if (delay > 0) session.mediaStartTimer = window.setTimeout(playMedia, delay * 1000);
+    if (delay > 0) session.mediaStartTimer = window.setTimeout(playMedia, delay / playbackRate * 1000);
     else playMedia();
   }
   const startBedAudio = (source: AudioBufferSourceNode | undefined, buffer: AudioBuffer | null, loop: boolean): void => {
@@ -2344,7 +2383,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   startBedAudio(session.bgmSource, state.bgmBuffer, elements.bgmLoop.checked);
   startBedAudio(session.ambientSource, state.ambientBuffer, elements.ambientLoop.checked);
   await new Promise<void>(resolve => {
-    const timer = window.setTimeout(resolve, remainingDuration * 1000 + 120);
+    const timer = window.setTimeout(resolve, remainingWallDuration * 1000 + 120);
     session.finish = () => { window.clearTimeout(timer); resolve(); };
   });
   delete session.finish;
@@ -2418,7 +2457,7 @@ function cancelExport(): void {
 const projectFieldIds = [
   'workTitle', 'workAuthor', 'workPublication', 'openingText', 'openingDuration', 'endingText', 'endingDuration',
   'aozoraUrl', 'scriptInput', 'pronunciationCorrections', 'ttsEngine', 'irodoriVoice', 'irodoriCaption', 'irodoriQuality', 'irodoriAttackFade',
-  'voiceSpeed', 'speakerId', 'showCaptions', 'captionEffect', 'captionSize', 'captionX', 'captionY',
+  'voiceSpeed', 'speakerId', 'previewSpeed', 'showCaptions', 'captionEffect', 'captionSize', 'captionX', 'captionY',
   'characterScale', 'backgroundScale', 'foregroundScale', 'characterMotion', 'hairMotion', 'legMotion',
   'mouthX', 'mouthY', 'mouthSize', 'useMouthSprites', 'bgmPreset', 'bgmVolume', 'bgmLoop',
   'ambientPreset', 'ambientVolume', 'ambientLoop'
@@ -3466,6 +3505,11 @@ elements.stageWrap.addEventListener('drop', event => {
 });
 
 elements.playButton.addEventListener('click', () => { void beginPlayback(); });
+elements.previewSpeed.addEventListener('change', () => {
+  if (!state.playing || state.exporting) return;
+  stopPlayback();
+  if (state.overallProgress < .999) void beginPlayback();
+});
 elements.rewind.addEventListener('click', () => stopPlayback(true));
 elements.exportButton.addEventListener('click', () => { void exportVideo(); });
 elements.cancelExport.addEventListener('click', cancelExport);
@@ -3474,6 +3518,10 @@ elements.toggleScriptReview.addEventListener('click', () => {
   const expanded = !elements.scriptReviewBody.hidden;
   elements.toggleScriptReview.setAttribute('aria-expanded', String(expanded));
   elements.toggleScriptReview.textContent = expanded ? '閉じる' : '開く';
+});
+elements.reviewSearch.addEventListener('input', () => {
+  state.reviewCueIndex = -2;
+  renderScriptReview(true);
 });
 elements.markReviewIssue.addEventListener('click', addCurrentReviewMarker);
 elements.reviewNote.addEventListener('keydown', event => {

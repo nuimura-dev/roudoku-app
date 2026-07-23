@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>朗読娘 — キャラクター動画スタジオ</title>
-  <link rel="stylesheet" href="/style.css?v=20260722-0002">
+  <link rel="stylesheet" href="/style.css?v=20260724-0001">
 </head>
 <body>
   <header class="topbar">
@@ -34,6 +34,7 @@
       <div class="transport">
         <button class="round" id="rewind" title="先頭に戻る">↶</button>
         <button class="play" id="playButton"><span>▶</span> プレビュー</button>
+        <label class="preview-speed" title="プレビューだけ再生速度を変更します">速度 <select id="previewSpeed"><option value="1">1.0×</option><option value="1.5">1.5×</option><option value="2">2.0×</option></select></label>
         <div class="timeline" id="timeline" role="slider" tabindex="0" aria-label="プレビュー再生位置" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="timelineFill"></div><i id="timelineHandle"></i></div>
         <button class="export" id="exportButton">MP4を書き出す <span>↗</span></button>
         <button class="cancel-action" id="cancelExport" type="button" hidden>書き出しを中止</button>
@@ -41,7 +42,7 @@
       <section class="script-review" id="scriptReview">
         <div class="script-review-head">
           <div><strong>台本チェック</strong><small id="reviewPosition">プレビュー位置と連動します</small></div>
-          <div><span id="reviewMarkerCount">要確認 0件</span><button id="toggleScriptReview" type="button" aria-expanded="true">閉じる</button></div>
+          <div><input id="reviewSearch" type="search" placeholder="台本を検索" aria-label="台本をキーワード検索"><span id="reviewMarkerCount">要確認 0件</span><button id="toggleScriptReview" type="button" aria-expanded="true">閉じる</button></div>
         </div>
         <div class="script-review-body" id="scriptReviewBody">
           <div class="review-context" id="reviewContext" aria-live="polite"></div>
@@ -239,6 +240,6 @@
     </aside>
   </main>
 
-  <script type="module" src="/app.js?v=20260723-0001"></script>
+  <script type="module" src="/app.js?v=20260723-0002"></script>
 </body>
 </html>
