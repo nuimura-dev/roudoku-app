@@ -2206,12 +2206,25 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   let data: Uint8Array<ArrayBuffer> | null = null;
   const hasAudio = Boolean(state.audioBuffer || state.audioElement || state.bgmBuffer || state.ambientBuffer);
   const destination = record && hasAudio ? ac.createMediaStreamDestination() : null;
+  const captureLimiter = destination ? ac.createDynamicsCompressor() : null;
+  const captureHeadroom = destination ? ac.createGain() : null;
+  if (captureLimiter && captureHeadroom && destination) {
+    // 朗読・BGM・環境音の合計ピークを録画前に抑え、Opus/AAC再圧縮時のクリックを防ぐ。
+    captureLimiter.threshold.value = -3;
+    captureLimiter.knee.value = 0;
+    captureLimiter.ratio.value = 20;
+    captureLimiter.attack.value = .002;
+    captureLimiter.release.value = .08;
+    captureHeadroom.gain.value = .9;
+    captureLimiter.connect(captureHeadroom);
+    captureHeadroom.connect(destination);
+  }
   if (state.audioBuffer) {
     session.source = ac.createBufferSource(); session.source.buffer = state.audioBuffer;
     analyser = ac.createAnalyser(); analyser.fftSize = 512; data = new Uint8Array(analyser.fftSize);
     session.narrationGain = ac.createGain();
     session.source.connect(analyser); analyser.connect(session.narrationGain); session.narrationGain.connect(ac.destination);
-    if (destination) session.narrationGain.connect(destination);
+    if (captureLimiter) session.narrationGain.connect(captureLimiter);
   } else if (state.audioElement) {
     // 省メモリで読み込んだ長編音声も、通常プレビュー・録画の両方で実波形を使う。
     // MediaElementSourceは同じaudio要素に一度しか作れないためstateへ保持する。
@@ -2220,7 +2233,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
     analyser = ac.createAnalyser(); analyser.fftSize = 512; data = new Uint8Array(analyser.fftSize);
     session.narrationGain = ac.createGain();
     state.audioMediaNode.connect(analyser); analyser.connect(session.narrationGain); session.narrationGain.connect(ac.destination);
-    if (destination) session.narrationGain.connect(destination);
+    if (captureLimiter) session.narrationGain.connect(captureLimiter);
   }
   if (state.bgmBuffer) {
     session.bgmSource = ac.createBufferSource();
@@ -2229,7 +2242,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
     session.bgmGain = ac.createGain();
     session.bgmSource.connect(session.bgmGain);
     session.bgmGain.connect(ac.destination);
-    if (destination) session.bgmGain.connect(destination);
+    if (captureLimiter) session.bgmGain.connect(captureLimiter);
   }
   if (state.ambientBuffer) {
     session.ambientSource = ac.createBufferSource();
@@ -2238,7 +2251,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
     session.ambientGain = ac.createGain();
     session.ambientSource.connect(session.ambientGain);
     session.ambientGain.connect(ac.destination);
-    if (destination) session.ambientGain.connect(destination);
+    if (captureLimiter) session.ambientGain.connect(captureLimiter);
   }
 
   let recorder: MediaRecorder | null = null;

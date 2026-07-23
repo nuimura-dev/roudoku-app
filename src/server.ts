@@ -285,6 +285,8 @@ async function convert(req: IncomingMessage, res: ServerResponse): Promise<void>
   const input = join(dir, 'capture.webm');
   const output = join(dir, 'character.mp4');
   const clientAbort = new AbortController();
+  // AACやYouTubeの再圧縮でピークが0dBを超えないよう、約-1.7dBの余裕を残す。
+  const safeAudioFilter = 'alimiter=limit=0.82:attack=5:release=80:level=false:latency=true';
   res.once('close', () => { if (!res.writableEnded) clientAbort.abort(); });
   try {
     await requestToFile(req, input, maxVideoUpload);
@@ -296,7 +298,7 @@ async function convert(req: IncomingMessage, res: ServerResponse): Promise<void>
         // NVDECのCUDAフレームはそのままNVENCへ渡す。ここでCPU用yuv420pを
         // 強制するとauto_scaleがCUDAフレームを変換できずフォールバックする。
         '-profile:v', 'high',
-        '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
+        '-af', safeAudioFilter, '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
       ], clientAbort.signal);
     } catch (nvdecError) {
       if (clientAbort.signal.aborted) throw nvdecError;
@@ -307,7 +309,7 @@ async function convert(req: IncomingMessage, res: ServerResponse): Promise<void>
           '-c:v', 'h264_nvenc', '-preset', 'p2', '-tune', 'hq',
           '-rc', 'vbr', '-cq', '24', '-b:v', '6M', '-maxrate', '10M', '-bufsize', '12M',
           '-profile:v', 'high', '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
+          '-af', safeAudioFilter, '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
         ], clientAbort.signal);
       } catch (nvencError) {
         if (clientAbort.signal.aborted) throw nvencError;
@@ -315,7 +317,7 @@ async function convert(req: IncomingMessage, res: ServerResponse): Promise<void>
         await run('ffmpeg', [
           '-y', '-i', input,
           '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
+          '-af', safeAudioFilter, '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output
         ], clientAbort.signal);
       }
     }
