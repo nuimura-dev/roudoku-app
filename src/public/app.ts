@@ -1,6 +1,7 @@
-import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, type ActiveCaption, type CaptionCue, type Expression, type SpeechTimelineChunk } from './script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, searchCaptionCues, type ActiveCaption, type CaptionCue, type Expression, type SpeechTimelineChunk } from './script.js';
 import { matchNearestTimelineAnchors, matchTimelineAnchors } from './alignment.js';
 import { createProjectBundle, maxProjectBundleBytes, readProjectBundle } from './project-bundle.js';
+import { playbackElapsed as playbackElapsedAtRate, playbackRate as selectedPlaybackRate } from './playback.js';
 
 type Viseme = 'closed' | 'a' | 'i' | 'u' | 'e' | 'o';
 type SceneLayer = 'background' | 'character' | 'foreground';
@@ -1487,10 +1488,7 @@ function renderScriptReview(force = false): void {
     return;
   }
   if (searchQuery) {
-    const matches = state.captionCues.flatMap((cue, index) => {
-      const searchable = `${cue.text}\n${cue.spoken}`.toLocaleLowerCase('ja');
-      return searchable.includes(searchQuery) ? [{ cue, index }] : [];
-    });
+    const matches = searchCaptionCues(state.captionCues, searchQuery);
     if (!matches.length) {
       const empty = document.createElement('div');
       empty.className = 'review-empty';
@@ -2167,7 +2165,7 @@ function updatePlaybackPosition(elapsed: number, total = duration()): void {
 
 function animationLoop(session: PlaybackSession, start: number, analyser: AnalyserNode | null, data: Uint8Array<ArrayBuffer> | null): void {
   const now = audioContext?.currentTime ?? performance.now() / 1000;
-  const clockElapsed = Math.min(session.duration, Math.max(0, session.startOffset + (now - start) * session.playbackRate));
+  const clockElapsed = playbackElapsedAtRate(session.startOffset, now - start, session.playbackRate, session.duration);
   const media = state.audioElement;
   // 長編省メモリ再生ではHTMLMediaElementとAudioContextが別々の時計で進む。
   // 実音声のcurrentTimeを正として、長時間再生時の字幕・台本チェックのずれを防ぐ。
@@ -2218,7 +2216,7 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
   const narration = narrationDuration();
   const ending = endingCardDuration();
   const total = opening + narration + ending;
-  const playbackRate = record ? 1 : Math.max(1, Math.min(2, Number(elements.previewSpeed.value) || 1));
+  const playbackRate = selectedPlaybackRate(elements.previewSpeed.value, record);
   const startOffset = record || state.overallProgress >= .999
     ? 0
     : Math.max(0, Math.min(total, state.playbackElapsed));

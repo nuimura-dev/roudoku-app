@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange } from '../public/script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, searchCaptionCues } from '../public/script.js';
 
 test('表情タグ付き台本を解析する', () => {
   assert.deepEqual(parseScript('こんにちは。[happy]うれしい！[sad]でも少し残念。'), [
@@ -96,6 +96,15 @@ test('一文の差し替え時間を後続字幕へ反映する', () => {
     replaceCaptionTimeRange([0, 2, 5, 9], 1, 2, [0, 1, 5]),
     [0, 2, 3, 7]
   );
+});
+
+test('台本検索は表示文と読み仮名の両方を対象にする', () => {
+  const cues = captionCues('｜仲好く《なかよく》話す。次の文章。');
+  assert.deepEqual(searchCaptionCues(cues, '仲好く').map(result => result.index), [0]);
+  assert.deepEqual(searchCaptionCues(cues, 'なかよく').map(result => result.index), [0]);
+  assert.deepEqual(searchCaptionCues(cues, '次の文章').map(result => result.index), [1]);
+  assert.deepEqual(searchCaptionCues(cues, '存在しない'), []);
+  assert.deepEqual(searchCaptionCues(cues, '   '), []);
 });
 
 test('朗読字幕を句点ごとの区間へ分ける', () => {

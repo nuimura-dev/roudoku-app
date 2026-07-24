@@ -172,6 +172,15 @@ export interface SpeechTimelineChunk {
   endMs: number;
 }
 
+export function searchCaptionCues(cues: readonly CaptionCue[], query: unknown): Array<{ cue: CaptionCue; index: number }> {
+  const normalizedQuery = String(query ?? '').trim().toLocaleLowerCase('ja');
+  if (!normalizedQuery) return [];
+  return cues.flatMap((cue, index) => {
+    const searchable = `${cue.text}\n${cue.spoken}`.toLocaleLowerCase('ja');
+    return searchable.includes(normalizedQuery) ? [{ cue, index }] : [];
+  });
+}
+
 export function parseSpeechTimeline(value: string | null): SpeechTimelineChunk[] | null {
   if (!value) return null;
   const chunks: SpeechTimelineChunk[] = [];
