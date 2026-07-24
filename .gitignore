@@ -34,5 +34,6 @@ exports/
 assets/voices/*
 !assets/voices/.gitkeep
 
-# Locally installed DOVA-SYNDROME BGM (redistribution is not permitted)
-assets/bgm/tsurugi-no-aruji.mp3
+# Locally installed BGM (redistribution permission varies by track/provider)
+assets/bgm/*.mp3
+assets/bgm/*:Zone.Identifier

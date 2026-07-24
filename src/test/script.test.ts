@@ -152,6 +152,7 @@ test('段落間の連続改行を直前の字幕時間へ加算する', () => {
 test('閉じかぎ括弧を直前の字幕へ含める', () => {
   const cues = captionCues('「風が吹いた。」彼女は空を見た。');
   assert.deepEqual(cues.map(cue => cue.text), ['「風が吹いた。」', '彼女は空を見た。']);
+  assert.deepEqual(cues.map(cue => cue.spoken), ['風が吹いた。', '彼女は空を見た。']);
 });
 
 test('無音のない長文を文字数だけでは分割しない', () => {

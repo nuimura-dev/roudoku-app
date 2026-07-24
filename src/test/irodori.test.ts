@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { encodeIrodoriTimeline, irodoriAttackFadeMs, irodoriPauseMs, irodoriPayload, parseIrodoriSse, splitIrodoriText, wavDurationSeconds } from '../irodori.js';
+import { encodeIrodoriTimeline, irodoriAttackFadeMs, irodoriPauseMs, irodoriPayload, normalizeIrodoriText, parseIrodoriSse, splitIrodoriText, wavDurationSeconds } from '../irodori.js';
 
 test('Irodori用の長文分割付きリクエストを作る', () => {
   assert.deepEqual(irodoriPayload({
@@ -72,6 +72,14 @@ test('Irodoriの上限内で句読点を優先して長文を分割する', () =
 test('区切りがない長文も上限で分割する', () => {
   const chunks = splitIrodoriText('読'.repeat(8500), 4000);
   assert.deepEqual(chunks.map(chunk => chunk.length), [4000, 4000, 500]);
+});
+
+test('閉じかぎ括弧後の改行を音声生成へ渡さない', () => {
+  const source = '「これで終わりです。」\r\n\r\n「次の文です。」';
+  const normalized = 'これで終わりです。 次の文です。';
+  assert.equal(normalizeIrodoriText(source), normalized);
+  assert.deepEqual(splitIrodoriText(source), [normalized]);
+  assert.equal(irodoriPayload({ text: source }).input, normalized);
 });
 
 test('WAVチャンクの実時間と字幕タイムラインを記録する', () => {

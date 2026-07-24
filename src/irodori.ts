@@ -96,8 +96,20 @@ export function parseIrodoriSse(value: string): IrodoriStreamChunk[] {
   return chunks;
 }
 
+export function normalizeIrodoriText(value: unknown): string {
+  return String(value ?? '')
+    .replace(/\r\n?/gu, '\n')
+    // 句点で分割された直後の閉じかぎ括弧だけが音声チャンクになるのを防ぐ。
+    .replace(/[「」『』]/gu, '')
+    // 改行だけの極端に短い生成単位をIrodoriへ渡すと、不要な発声が混ざることがある。
+    // 段落情報は字幕用の元台本に残し、音声生成用の入力では通常の語間へ変換する。
+    .replace(/[\p{Zs}\t]*\n+[\p{Zs}\t]*/gu, ' ')
+    .replace(/[\p{Zs}\t]+/gu, ' ')
+    .trim();
+}
+
 export function splitIrodoriText(value: unknown, maxChars = 4000): string[] {
-  const text = String(value ?? '').trim();
+  const text = normalizeIrodoriText(value);
   if (!text) return [];
   if (!Number.isInteger(maxChars) || maxChars < 1) throw new Error('分割文字数が不正です');
 
@@ -123,7 +135,7 @@ export function splitIrodoriText(value: unknown, maxChars = 4000): string[] {
 }
 
 export function irodoriPayload(request: IrodoriSpeechRequest): IrodoriApiPayload {
-  const input = String(request.text ?? '').trim();
+  const input = normalizeIrodoriText(request.text);
   if (!input) throw new Error('台本を入力してください');
   const voice = String(request.voice ?? 'none').trim() || 'none';
   if (voice !== 'none' && !/^[\p{Letter}\p{Number}_.-]{1,80}$/u.test(voice)) {

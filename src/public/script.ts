@@ -95,6 +95,8 @@ export function plainText(source: unknown): string {
   return parseScript(normalizedSource).map(item => item.text).filter(Boolean).join(' ')
     .replace(/｜([^《\n]+)《([^》\n]+)》/g, '$2')
     .replace(/([\p{Script=Han}々〆ヵヶ]+)《([^》\n]+)》/gu, '$2')
+    // かぎ括弧は字幕には表示するが発音されないため、音声とタイムラインの文字数から除く。
+    .replace(/[「」『』]/gu, '')
     .replace(/[A-Za-z][A-Za-z0-9]*/g, latinReading);
 }
 

@@ -293,11 +293,10 @@ const defaultSceneAssets = {
   foreground: '/assets/scene-samples/desk-foreground.png'
 } as const;
 const defaultBgmAssets: Record<string, { url: string; label: string }> = {
-  gogatsunokaze: { url: '/assets/bgm/gogatsunokaze.mp3', label: '5月の風' },
-  irishnokaze: { url: '/assets/bgm/irishnokaze.mp3', label: 'アイリッシュの風' },
-  musmus105a: { url: '/assets/bgm/MusMus-BGM-105a.mp3', label: '卒業（音楽室ver.）' },
-  musmus105b: { url: '/assets/bgm/MusMus-BGM-105b.mp3', label: '卒業（体育館ver.）' },
-  seiya: { url: '/assets/bgm/seiya.mp3', label: '聖夜' },
+  amenoHiNoNiwa: { url: '/assets/bgm/ameno-hino-niwa.mp3', label: '雨の日の庭' },
+  hanataba: { url: '/assets/bgm/hanataba.mp3', label: '花束' },
+  yoruwoSagashite: { url: '/assets/bgm/yoruwo-sagashite.mp3', label: '夜を探して' },
+  yumenoOwari: { url: '/assets/bgm/yumeno-owari.mp3', label: '夢の終わり' },
   tsurugiNoAruji: { url: '/assets/bgm/tsurugi-no-aruji.mp3', label: '剣の主' }
 };
 const defaultAmbientAssets: Record<string, { url: string; label: string }> = {
