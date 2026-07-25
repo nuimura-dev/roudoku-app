@@ -18,6 +18,10 @@ test('青空文庫のルビをVOICEVOX用の読みに変換する', () => {
   assert.equal(plainText('｜羅生門《らしょうもん》で下人《げにん》が待つ。'), 'らしょうもんでげにんが待つ。');
 });
 
+test('タイトルカード用の表示文字からルビ記法だけを除く', () => {
+  assert.equal(displayText('｜去年《きょねん》の木\n新美南吉'), '去年の木\n新美南吉');
+});
+
 test('英字は音声用の読みに変換し、字幕では元の表記を保つ', () => {
   const spoken = 'ブイアール リーダーとエムピーフォー。';
   assert.equal(plainText('VR ReaderとMP4。'), spoken);

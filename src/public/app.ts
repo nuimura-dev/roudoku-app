@@ -1,4 +1,4 @@
-import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, searchCaptionCues, type ActiveCaption, type CaptionCue, type Expression, type SpeechTimelineChunk } from './script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, searchCaptionCues, type ActiveCaption, type CaptionCue, type Expression, type SpeechTimelineChunk } from './script.js';
 import { matchNearestTimelineAnchors, matchTimelineAnchors } from './alignment.js';
 import { createProjectBundle, maxProjectBundleBytes, readProjectBundle } from './project-bundle.js';
 import { playbackElapsed as playbackElapsedAtRate, playbackRate as selectedPlaybackRate } from './playback.js';
@@ -366,10 +366,10 @@ function estimatedNarrationDuration(): number {
 function videoCardText(opening: boolean): string {
   const template = opening ? elements.openingText.value : elements.endingText.value;
   const publication = elements.workPublication.value.trim();
-  return template
+  return displayText(template
     .replaceAll('{{title}}', elements.workTitle.value.trim())
     .replaceAll('{{author}}', elements.workAuthor.value.trim())
-    .replaceAll('{{publication}}', publication ? `初出：${publication}` : '')
+    .replaceAll('{{publication}}', publication ? `初出：${publication}` : ''))
     .trim();
 }
 
