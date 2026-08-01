@@ -183,6 +183,19 @@ export function searchCaptionCues(cues: readonly CaptionCue[], query: unknown): 
   });
 }
 
+export function translationLines(value: unknown): string[] {
+  return String(value ?? '')
+    .split(/\r?\n/u)
+    .map(line => line.trim())
+    .filter(Boolean);
+}
+
+export function translationAtCaption(value: unknown, captionIndex: number, metadataCueCount = 0): string {
+  if (!Number.isInteger(captionIndex) || !Number.isInteger(metadataCueCount)) return '';
+  const bodyIndex = captionIndex - Math.max(0, metadataCueCount);
+  return bodyIndex < 0 ? '' : translationLines(value)[bodyIndex] ?? '';
+}
+
 export function parseSpeechTimeline(value: string | null): SpeechTimelineChunk[] | null {
   if (!value) return null;
   const chunks: SpeechTimelineChunk[] = [];

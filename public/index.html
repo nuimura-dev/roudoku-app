@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>朗読娘 — キャラクター動画スタジオ</title>
-  <link rel="stylesheet" href="/style.css?v=20260724-0001">
+  <link rel="stylesheet" href="/style.css?v=20260725-0002">
 </head>
 <body>
   <header class="topbar">
@@ -84,6 +84,15 @@
           <small id="aozoraStatus">XHTML版の本文とルビを取り込みます</small>
         </div>
         <textarea id="scriptInput" rows="10" spellcheck="true" placeholder="ここにキャラクターが話す文章を入力します。">こんにちは！朗読娘へようこそ。[happy] テキストと一枚の画像から、表情豊かなキャラクター動画を作れます。[surprised] とても簡単でしょう？</textarea>
+        <div class="translation-panel">
+          <div><strong>英訳字幕</strong><small id="translationSummary">空欄なら表示しません</small></div>
+          <div class="translation-metadata">
+            <label>英語タイトル<input id="englishTitle" type="text" lang="en" placeholder="Unbeaten by the Rain"></label>
+            <label>英語著者名<input id="englishAuthor" type="text" lang="en" placeholder="Kenji Miyazawa"></label>
+          </div>
+          <textarea id="englishTranslation" rows="5" spellcheck="true" lang="en" placeholder="日本語字幕1つにつき英訳を1行ずつ入力します。&#10;Strong in the rain&#10;Strong in the wind"></textarea>
+          <small>タイトル・著者を除く本文字幕の順番に対応します。空行は数えません。</small>
+        </div>
         <div class="english-ruby-panel" id="englishRubyPanel" hidden>
           <div><strong>英語の読み</strong><small id="englishRubySummary"></small></div>
           <div class="english-ruby-list" id="englishRubyList"></div>
@@ -107,6 +116,9 @@
           <div><strong>この台本から音声を生成</strong><small>音声タブの声・速度・品質設定を使用します</small></div>
           <div class="generation-actions"><button id="generateVoiceFromScript" type="button">音声を生成</button><button class="secondary-action" id="generateVoiceAndExport" type="button">音声生成 → MP4</button><button class="save-audio-action" id="saveAudioFromScript" type="button" disabled>音声を保存</button><button class="secondary-action" id="declickAudioFromScript" type="button" disabled>パチパチノイズ除去</button><button class="secondary-action" id="deessAudioFromScript" type="button" disabled>サ行ノイズ軽減</button><button class="cancel-action" id="cancelVoiceFromScript" type="button" hidden>中止</button></div>
           <label class="caption-toggle">朗読中の文章を画面に表示 <input id="showCaptions" type="checkbox" checked></label>
+          <label class="caption-effect layout-control">動画レイアウト
+            <select id="videoLayout"><option value="landscape" selected>横長 16:9（1280×720）</option><option value="portrait">縦長 9:16（1080×1920）</option></select>
+          </label>
           <label class="caption-effect">字幕エフェクト
             <select id="captionEffect"><option value="wind">風フェード</option><option value="twist">黒文字・斜めツイスト</option><option value="fixed-panel" selected>白い固定パネル・先読み</option></select>
           </label>
@@ -239,6 +251,6 @@
     </aside>
   </main>
 
-  <script type="module" src="/app.js?v=20260725-0002"></script>
+  <script type="module" src="/app.js?v=20260727-0002"></script>
 </body>
 </html>

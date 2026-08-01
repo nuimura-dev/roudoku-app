@@ -1,4 +1,4 @@
-import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, searchCaptionCues, type ActiveCaption, type CaptionCue, type Expression, type SpeechTimelineChunk } from './script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, searchCaptionCues, translationAtCaption, translationLines, type ActiveCaption, type CaptionCue, type Expression, type SpeechTimelineChunk } from './script.js';
 import { matchNearestTimelineAnchors, matchTimelineAnchors } from './alignment.js';
 import { createProjectBundle, maxProjectBundleBytes, readProjectBundle } from './project-bundle.js';
 import { playbackElapsed as playbackElapsedAtRate, playbackRate as selectedPlaybackRate } from './playback.js';
@@ -52,6 +52,7 @@ interface PlaybackSession {
 interface AppState {
   images: Partial<Record<Expression, HTMLImageElement>>;
   sceneImages: Partial<Record<'background' | 'foreground', HTMLImageElement>>;
+  defaultBackgroundActive: boolean;
   layerOffsets: Record<SceneLayer, LayerOffset>;
   activeLayer: SceneLayer;
   mouthPatches: Partial<Record<Expression, HTMLCanvasElement>>;
@@ -109,6 +110,10 @@ const elements = {
   endingText: required<HTMLTextAreaElement>('#endingText'),
   endingDuration: required<HTMLInputElement>('#endingDuration'),
   script: required<HTMLTextAreaElement>('#scriptInput'),
+  englishTitle: required<HTMLInputElement>('#englishTitle'),
+  englishAuthor: required<HTMLInputElement>('#englishAuthor'),
+  englishTranslation: required<HTMLTextAreaElement>('#englishTranslation'),
+  translationSummary: required<HTMLElement>('#translationSummary'),
   charCount: required<HTMLElement>('#charCount'),
   scriptMap: required<HTMLElement>('#scriptMap'),
   englishRubyPanel: required<HTMLElement>('#englishRubyPanel'),
@@ -137,6 +142,7 @@ const elements = {
   hairMotion: required<HTMLInputElement>('#hairMotion'),
   legMotion: required<HTMLInputElement>('#legMotion'),
   useMouthSprites: required<HTMLInputElement>('#useMouthSprites'),
+  videoLayout: required<HTMLSelectElement>('#videoLayout'),
   expressionPreviewButtons: required<HTMLElement>('#expressionPreviewButtons'),
   ttsEngine: required<HTMLSelectElement>('#ttsEngine'),
   ttsEngineName: required<HTMLElement>('#ttsEngineName'),
@@ -170,6 +176,7 @@ const elements = {
   ambientName: required<HTMLElement>('#ambientName'),
   baseImage: required<HTMLInputElement>('#baseImage'),
   backgroundImage: required<HTMLInputElement>('#backgroundImage'),
+  backgroundName: required<HTMLElement>('#backgroundName'),
   foregroundImage: required<HTMLInputElement>('#foregroundImage'),
   layerButtons: required<HTMLElement>('#layerButtons'),
   resetLayerPosition: required<HTMLButtonElement>('#resetLayerPosition'),
@@ -227,17 +234,70 @@ const legPartContextCandidate = legPartCanvas.getContext('2d');
 if (!legPartContextCandidate) throw new Error('Leg part canvas is unavailable');
 const legPartContext: CanvasRenderingContext2D = legPartContextCandidate;
 
-const defaultLayerOffsets: Record<SceneLayer, LayerOffset> = {
-  background: { x: 0, y: 0 },
-  character: { x: 431, y: 41 },
-  foreground: { x: 207, y: 145 }
+const defaultLayerOffsets: Record<'landscape' | 'portrait', Record<SceneLayer, LayerOffset>> = {
+  landscape: {
+    background: { x: 0, y: 0 },
+    character: { x: 431, y: 41 },
+    foreground: { x: 207, y: 145 }
+  },
+  portrait: {
+    background: { x: 0, y: 0 },
+    character: { x: 353.3201077158865, y: -504.30224202407396 },
+    foreground: { x: 77.82385231493913, y: 225.69045359261804 }
+  }
 };
 function defaultLayerOffset(layer: SceneLayer): LayerOffset {
-  return { ...defaultLayerOffsets[layer] };
+  const layout = elements.videoLayout.value === 'portrait' ? 'portrait' : 'landscape';
+  return { ...defaultLayerOffsets[layout][layer] };
+}
+
+const layoutVisualDefaults = {
+  landscape: {
+    captionEffect: 'fixed-panel',
+    captionSize: '27',
+    captionX: '7',
+    captionY: '49',
+    characterScale: '91',
+    backgroundScale: '100',
+    foregroundScale: '72',
+    characterMotion: '100',
+    hairMotion: '100',
+    legMotion: '100',
+    mouthX: '52',
+    mouthY: '35',
+    mouthSize: '37'
+  },
+  portrait: {
+    captionEffect: 'fixed-panel',
+    captionSize: '27',
+    captionX: '7',
+    captionY: '49',
+    characterScale: '67',
+    backgroundScale: '100',
+    foregroundScale: '104',
+    characterMotion: '100',
+    hairMotion: '100',
+    legMotion: '100',
+    mouthX: '52',
+    mouthY: '35',
+    mouthSize: '37'
+  }
+} as const;
+
+function applyLayoutVisualDefaults(layout: 'landscape' | 'portrait'): void {
+  const defaults = layoutVisualDefaults[layout];
+  for (const [id, value] of Object.entries(defaults)) {
+    const control = elements[id as keyof typeof defaults] as HTMLInputElement | HTMLSelectElement;
+    control.value = value;
+    const output = document.querySelector<HTMLOutputElement>(`#${id}Out`);
+    if (output) output.textContent = `${value}${id === 'captionSize' ? 'px' : '%'}`;
+  }
+  elements.showCaptions.checked = true;
+  elements.useMouthSprites.checked = true;
 }
 
 const state: AppState = {
-  images: {}, sceneImages: {}, mouthPatches: {}, mouthImages: {},
+  images: {}, sceneImages: {}, defaultBackgroundActive: true, mouthPatches: {}, mouthImages: {},
   layerOffsets: {
     background: defaultLayerOffset('background'),
     character: defaultLayerOffset('character'),
@@ -248,6 +308,29 @@ const state: AppState = {
   expressionTransitionStartedAt: Number.NEGATIVE_INFINITY, currentViseme: 'closed', session: null, captionCues: [], captionTimes: null,
   reviewMarkers: [], reviewCueIndex: -2
 };
+
+function applyVideoLayout(resetOffsets = false): void {
+  const portrait = elements.videoLayout.value === 'portrait';
+  const layout = portrait ? 'portrait' : 'landscape';
+  const width = portrait ? 1080 : 1280;
+  const height = portrait ? 1920 : 720;
+  const changed = elements.canvas.width !== width || elements.canvas.height !== height;
+  elements.canvas.width = width;
+  elements.canvas.height = height;
+  expressionPartCanvas.width = width;
+  expressionPartCanvas.height = height;
+  legPartCanvas.width = width;
+  legPartCanvas.height = height;
+  elements.stageWrap.dataset.layout = portrait ? 'portrait' : 'landscape';
+  if (changed && resetOffsets) {
+    applyLayoutVisualDefaults(layout);
+    state.layerOffsets.background = defaultLayerOffset('background');
+    state.layerOffsets.character = defaultLayerOffset('character');
+    state.layerOffsets.foreground = defaultLayerOffset('foreground');
+  }
+  draw();
+}
+
 let voiceGenerationController: AbortController | null = null;
 let pronunciationPreviewController: AbortController | null = null;
 let pronunciationPreviewAudio: HTMLAudioElement | null = null;
@@ -288,8 +371,11 @@ const defaultMouthAssets: Record<Viseme, string> = {
   e: '/assets/character-reader/mouth/e.png',
   o: '/assets/character-reader/mouth/o.png'
 };
+const defaultBackgroundAssets = {
+  landscape: '/assets/scene-samples/reading-room.png',
+  portrait: '/assets/scene-samples/reading-room-portrait.png'
+} as const;
 const defaultSceneAssets = {
-  background: '/assets/scene-samples/reading-room.png',
   foreground: '/assets/scene-samples/desk-foreground.png'
 } as const;
 const defaultBgmAssets: Record<string, { url: string; label: string }> = {
@@ -459,6 +545,16 @@ function drawSceneLayer(layer: 'background' | 'foreground'): void {
   if (!image) return;
   const box = sceneLayerBox(image, layer);
   ctx.drawImage(image, box.x, box.y, box.width, box.height);
+}
+
+async function syncDefaultBackgroundToLayout(): Promise<void> {
+  if (!state.defaultBackgroundActive) return;
+  const layout = elements.videoLayout.value === 'portrait' ? 'portrait' : 'landscape';
+  const image = await urlToImage(defaultBackgroundAssets[layout]);
+  if (!state.defaultBackgroundActive || elements.videoLayout.value !== layout) return;
+  state.sceneImages.background = image;
+  elements.backgroundName.textContent = layout === 'portrait' ? 'サンプル（縦長）' : 'サンプル（横長）';
+  draw();
 }
 
 function createMouthRemovalPatch(image: HTMLImageElement, expression: Expression): HTMLCanvasElement {
@@ -773,9 +869,9 @@ function drawRubyCaptionLine(line: RubyCaptionLine, left: number, baseY: number,
   ctx.font = baseFont;
 }
 
-function drawTwistReadingCaption(time: number, caption: ActiveCaption): void {
+function drawTwistReadingCaption(time: number, caption: ActiveCaption): { bottom: number; left: number } {
   ctx.save();
-  const fontSize = Number(elements.captionSize.value);
+  const fontSize = Number(elements.captionSize.value) * 1.25;
   ctx.font = `700 ${fontSize}px "Yu Mincho", YuMincho, "Hiragino Mincho ProN", "Noto Serif JP", serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -872,6 +968,7 @@ function drawTwistReadingCaption(time: number, caption: ActiveCaption): void {
   ctx.filter = `blur(${(1 - panelOpacity) * 1.2}px)`;
   readings.forEach(reading => ctx.fillText(reading.text, leftX + reading.x, centerY + reading.y));
   ctx.restore();
+  return { bottom: centerY + panelHeight / 2, left: leftX };
 }
 
 function drawFixedReadingPanel(caption: ActiveCaption): void {
@@ -879,7 +976,7 @@ function drawFixedReadingPanel(caption: ActiveCaption): void {
   const fontSize = Number(elements.captionSize.value);
   const lineHeight = fontSize * 1.82;
   const panelX = elements.canvas.width * Number(elements.captionX.value) / 100;
-  const panelWidth = Math.min(elements.canvas.width * .43, elements.canvas.width - panelX - elements.canvas.width * .035);
+  const panelWidth = Math.min(elements.canvas.width * .48, elements.canvas.width - panelX - elements.canvas.width * .035);
   const panelHeight = elements.canvas.height * .68;
   const requestedCenterY = elements.canvas.height * Number(elements.captionY.value) / 100;
   const panelY = Math.max(12, Math.min(elements.canvas.height - panelHeight - 12, requestedCenterY - panelHeight / 2));
@@ -888,7 +985,7 @@ function drawFixedReadingPanel(caption: ActiveCaption): void {
   const textWidth = panelWidth - paddingX * 2;
   const maxLines = Math.max(1, Math.floor((panelHeight - paddingY * 2) / lineHeight));
 
-  ctx.globalAlpha = .78;
+  ctx.globalAlpha = .68;
   ctx.fillStyle = '#fff';
   ctx.fillRect(panelX, panelY, panelWidth, panelHeight);
   ctx.globalAlpha = 1;
@@ -1529,16 +1626,102 @@ function renderScriptReview(force = false): void {
   elements.reviewContext.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
 }
 
+function bodyCaptionCues(): CaptionCue[] {
+  const source = applyJapaneseRubyCorrections(elements.script.value, pronunciationReadings(false));
+  return captionCues(source);
+}
+
+function updateTranslationSummary(): void {
+  const translations = translationLines(elements.englishTranslation.value);
+  const bodyCount = bodyCaptionCues().length;
+  elements.translationSummary.textContent = translations.length
+    ? `英訳 ${translations.length}行 / 本文字幕 ${bodyCount}件`
+    : '空欄なら表示しません';
+}
+
+function englishCaptionAt(captionIndex: number): string {
+  const readings = pronunciationReadings(false);
+  const title = elements.workTitle.value.trim();
+  const author = elements.workAuthor.value.trim();
+  const titleCueCount = title
+    ? captionCues(`作品名、${applyJapaneseRubyCorrections(title, readings)}。`).length
+    : 0;
+  const authorCueCount = author
+    ? captionCues(`著者、${applyJapaneseRubyCorrections(author, readings)}。`).length
+    : 0;
+  if (captionIndex < titleCueCount) {
+    return captionIndex === 0 ? 'Title' : elements.englishTitle.value.trim();
+  }
+  if (captionIndex < titleCueCount + authorCueCount) {
+    return captionIndex === titleCueCount ? 'Author' : elements.englishAuthor.value.trim();
+  }
+  const metadataCount = titleCueCount + authorCueCount;
+  return translationAtCaption(elements.englishTranslation.value, captionIndex, metadataCount);
+}
+
+function drawEnglishCaption(caption: ActiveCaption, placement?: { belowJapanese?: number; left?: number }): void {
+  const text = englishCaptionAt(caption.index);
+  if (!text) return;
+  const fadeIn = smoothStep(caption.progress / .08);
+  const fadeOut = smoothStep((1 - caption.progress) / .1);
+  const opacity = Math.min(fadeIn, fadeOut);
+  if (opacity <= .005) return;
+
+  const portrait = elements.videoLayout.value === 'portrait';
+  const fontSize = portrait ? 40 : Math.max(18, Math.round(Number(elements.captionSize.value) * .72));
+  const leftAligned = placement?.left !== undefined;
+  const textLeft = leftAligned
+    ? Math.max(fontSize * .5, Math.min(elements.canvas.width - fontSize * 2, placement.left!))
+    : elements.canvas.width / 2;
+  const maxWidth = leftAligned
+    ? Math.max(fontSize * 2, elements.canvas.width - textLeft - elements.canvas.width * .04)
+    : elements.canvas.width * (portrait ? .82 : .7);
+  ctx.save();
+  ctx.font = `500 ${fontSize}px Inter, "Segoe UI", Arial, sans-serif`;
+  ctx.textAlign = leftAligned ? 'left' : 'center';
+  ctx.textBaseline = 'middle';
+  const lines = captionLines(text, maxWidth);
+  const lineHeight = fontSize * 1.34;
+  const panelWidth = Math.min(
+    leftAligned ? elements.canvas.width - textLeft + fontSize * .45 : elements.canvas.width * .9,
+    Math.max(...lines.map(line => ctx.measureText(line).width)) + fontSize * 1.7
+  );
+  const panelHeight = lines.length * lineHeight + fontSize * 1.05;
+  const panelX = leftAligned ? Math.max(0, textLeft - fontSize * .45) : (elements.canvas.width - panelWidth) / 2;
+  const textX = leftAligned ? textLeft : elements.canvas.width / 2;
+  const defaultCenterY = elements.canvas.height * (portrait ? .86 : .88);
+  const requestedCenterY = placement?.belowJapanese === undefined
+    ? defaultCenterY
+    : placement.belowJapanese + panelHeight / 2 + fontSize * .38;
+  const centerY = Math.max(panelHeight / 2 + 8, Math.min(
+    elements.canvas.height - panelHeight / 2 - 8,
+    requestedCenterY
+  ));
+  ctx.globalAlpha = opacity * .78;
+  ctx.fillStyle = 'rgba(6,8,7,.82)';
+  ctx.fillRect(panelX, centerY - panelHeight / 2, panelWidth, panelHeight);
+  ctx.globalAlpha = opacity;
+  ctx.fillStyle = '#f7f5ee';
+  ctx.shadowColor = 'rgba(0,0,0,.9)';
+  ctx.shadowBlur = 8;
+  lines.forEach((line, index) => {
+    ctx.fillText(line, textX, centerY + (index - (lines.length - 1) / 2) * lineHeight);
+  });
+  ctx.restore();
+}
+
 function drawReadingCaption(time: number): void {
   if (state.playbackPhase !== 'narration' || !elements.showCaptions.checked) return;
   const caption = activeCaptionForPlayback();
   if (!caption) return;
   if (elements.captionEffect.value === 'fixed-panel') {
     drawFixedReadingPanel(caption);
+    drawEnglishCaption(caption);
     return;
   }
   if (elements.captionEffect.value === 'twist') {
-    drawTwistReadingCaption(time, caption);
+    const japanese = drawTwistReadingCaption(time, caption);
+    drawEnglishCaption(caption, { belowJapanese: japanese.bottom, left: japanese.left });
     return;
   }
   const fadeIn = smoothStep(caption.progress / .08);
@@ -1605,6 +1788,7 @@ function drawReadingCaption(time: number): void {
   ctx.fillStyle = '#d8ff45';
   ctx.fillRect(textX, panelY + panelHeight - 5, Math.min(180, panelWidth * .26), 2);
   ctx.restore();
+  drawEnglishCaption(caption);
 }
 
 function drawVideoCard(): void {
@@ -1627,11 +1811,13 @@ function drawVideoCard(): void {
   shade.addColorStop(1, 'rgba(8,10,8,.92)');
   ctx.fillStyle = shade;
   ctx.fillRect(0, 0, elements.canvas.width, elements.canvas.height);
-  ctx.font = '700 54px "Yu Mincho", YuMincho, "Hiragino Mincho ProN", "Noto Serif JP", serif';
+  const portrait = elements.videoLayout.value === 'portrait';
+  const cardFontSize = portrait ? 68 : 54;
+  ctx.font = `700 ${cardFontSize}px "Yu Mincho", YuMincho, "Hiragino Mincho ProN", "Noto Serif JP", serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   const lines = text.split(/\r?\n/u).flatMap(line => captionLines(line, elements.canvas.width * .76));
-  const lineHeight = 76;
+  const lineHeight = cardFontSize * 1.4;
   ctx.fillStyle = '#f3f0e6';
   ctx.shadowColor = 'rgba(0,0,0,.8)';
   ctx.shadowBlur = 14;
@@ -1639,7 +1825,8 @@ function drawVideoCard(): void {
     ctx.fillText(line, elements.canvas.width / 2, elements.canvas.height / 2 + (index - (lines.length - 1) / 2) * lineHeight);
   });
   ctx.fillStyle = '#d8ff45';
-  ctx.fillRect(elements.canvas.width / 2 - 70, elements.canvas.height / 2 + lines.length * lineHeight / 2 + 22, 140, 2);
+  const accentWidth = portrait ? 180 : 140;
+  ctx.fillRect(elements.canvas.width / 2 - accentWidth / 2, elements.canvas.height / 2 + lines.length * lineHeight / 2 + 22, accentWidth, portrait ? 3 : 2);
   ctx.restore();
 }
 
@@ -1703,6 +1890,7 @@ function updateScript(): void {
   const source = elements.script.value;
   state.captionCues = captionCues(playbackScriptSource());
   state.captionTimes = null;
+  updateTranslationSummary();
   elements.charCount.textContent = `${[...plainText(source)].length} 文字`;
   const segments = parseScript(source);
   elements.scriptMap.replaceChildren(...segments.map(item => {
@@ -1804,6 +1992,7 @@ async function applyLayerFile(layer: SceneLayer, file: File): Promise<void> {
     elements.emptyStage.classList.add('hidden');
   } else {
     state.sceneImages[layer] = image;
+    if (layer === 'background') state.defaultBackgroundActive = false;
     required<HTMLElement>(`#${layer}Name`).textContent = file.name;
   }
   state.layerOffsets[layer] = defaultLayerOffset(layer);
@@ -1830,6 +2019,7 @@ async function loadDefaultCharacter(): Promise<void> {
     for (const [layer, image] of sceneEntries) {
       state.sceneImages[layer as 'background' | 'foreground'] = image;
     }
+    await syncDefaultBackgroundToLayout();
     elements.emptyStage.classList.add('hidden');
     elements.statusText.textContent = 'デフォルトキャラ読込済み';
     for (const expression of ['happy', 'sad', 'angry', 'surprised'] as const) {
@@ -2297,7 +2487,8 @@ async function beginPlayback({ record = false }: { record?: boolean } = {}): Pro
     destination?.stream.getAudioTracks().forEach(track => stream.addTrack(track));
     const mimeType = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find(candidate => MediaRecorder.isTypeSupported(candidate));
     const chunks: Blob[] = [];
-    recorder = new MediaRecorder(stream, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: 4_000_000 });
+    const videoBitsPerSecond = elements.videoLayout.value === 'portrait' ? 8_000_000 : 4_000_000;
+    recorder = new MediaRecorder(stream, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond });
     const activeRecorder = recorder;
     recorded = new Promise(resolve => {
       activeRecorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
@@ -2453,8 +2644,8 @@ function cancelExport(): void {
 
 const projectFieldIds = [
   'workTitle', 'workAuthor', 'workPublication', 'openingText', 'openingDuration', 'endingText', 'endingDuration',
-  'aozoraUrl', 'scriptInput', 'pronunciationCorrections', 'ttsEngine', 'irodoriVoice', 'irodoriCaption', 'irodoriQuality', 'irodoriAttackFade',
-  'voiceSpeed', 'speakerId', 'previewSpeed', 'showCaptions', 'captionEffect', 'captionSize', 'captionX', 'captionY',
+  'aozoraUrl', 'scriptInput', 'englishTitle', 'englishAuthor', 'englishTranslation', 'pronunciationCorrections', 'ttsEngine', 'irodoriVoice', 'irodoriCaption', 'irodoriQuality', 'irodoriAttackFade',
+  'voiceSpeed', 'speakerId', 'previewSpeed', 'showCaptions', 'videoLayout', 'captionEffect', 'captionSize', 'captionX', 'captionY',
   'characterScale', 'backgroundScale', 'foregroundScale', 'characterMotion', 'hairMotion', 'legMotion',
   'mouthX', 'mouthY', 'mouthSize', 'useMouthSprites', 'bgmPreset', 'bgmVolume', 'bgmLoop',
   'ambientPreset', 'ambientVolume', 'ambientLoop'
@@ -2653,9 +2844,11 @@ async function loadProject(file: File): Promise<void> {
     }
   }
   const offsets = project.layerOffsets;
-  state.layerOffsets.background = validOffset(offsets?.background, defaultLayerOffsets.background);
-  state.layerOffsets.character = validOffset(offsets?.character, defaultLayerOffsets.character);
-  state.layerOffsets.foreground = validOffset(offsets?.foreground, defaultLayerOffsets.foreground);
+  state.layerOffsets.background = validOffset(offsets?.background, defaultLayerOffset('background'));
+  state.layerOffsets.character = validOffset(offsets?.character, defaultLayerOffset('character'));
+  state.layerOffsets.foreground = validOffset(offsets?.foreground, defaultLayerOffset('foreground'));
+  applyVideoLayout(false);
+  await syncDefaultBackgroundToLayout();
   const activeLayer = project.activeLayer;
   setActiveLayer(activeLayer === 'background' || activeLayer === 'foreground' ? activeLayer : 'character');
   state.reviewMarkers = Array.isArray(project.reviewMarkers)
@@ -2737,6 +2930,11 @@ elements.openProject.addEventListener('change', async () => {
 });
 
 elements.script.addEventListener('input', updateScript);
+[elements.englishTitle, elements.englishAuthor].forEach(input => input.addEventListener('input', () => draw()));
+elements.englishTranslation.addEventListener('input', () => {
+  updateTranslationSummary();
+  draw();
+});
 elements.applyEnglishRuby.addEventListener('click', () => {
   const readings: Record<string, string> = {};
   elements.englishRubyList.querySelectorAll<HTMLInputElement>('input[data-word]').forEach(input => {
@@ -2868,6 +3066,10 @@ elements.resetLayerPosition.addEventListener('click', () => {
 });
 elements.useMouthSprites.addEventListener('change', () => draw());
 elements.showCaptions.addEventListener('change', () => draw());
+elements.videoLayout.addEventListener('change', () => {
+  applyVideoLayout(true);
+  void syncDefaultBackgroundToLayout();
+});
 elements.captionEffect.addEventListener('change', () => draw());
 (['captionSize', 'captionX', 'captionY'] as const).forEach(id => elements[id].addEventListener('input', () => {
   const suffix = id === 'captionSize' ? 'px' : '%';
@@ -3633,4 +3835,4 @@ document.addEventListener('keydown', event => {
 });
 window.addEventListener('beforeunload', () => stopPlayback());
 
-setActiveLayer('character'); updateTtsEngine(); updateScript(); renderPronunciationPreviewList(); renderReviewMarkers(); draw(); void loadDefaultCharacter(); void loadBgmPreset(elements.bgmPreset.value, false); void loadAmbientPreset(elements.ambientPreset.value, false);
+applyVideoLayout(false); setActiveLayer('character'); updateTtsEngine(); updateScript(); renderPronunciationPreviewList(); renderReviewMarkers(); draw(); void loadDefaultCharacter(); void loadBgmPreset(elements.bgmPreset.value, false); void loadAmbientPreset(elements.ambientPreset.value, false);

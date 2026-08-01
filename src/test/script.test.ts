@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, searchCaptionCues } from '../public/script.js';
+import { activeCaption, applyEnglishRuby, applyJapaneseRubyCorrections, captionCues, captionTimesFromSpeechTimeline, displayText, englishRubyCandidates, expressionAt, isPunctuationPause, parseScript, parseSpeechTimeline, plainText, replaceCaptionTimeRange, searchCaptionCues, translationAtCaption, translationLines } from '../public/script.js';
 
 test('表情タグ付き台本を解析する', () => {
   assert.deepEqual(parseScript('こんにちは。[happy]うれしい！[sad]でも少し残念。'), [
@@ -20,6 +20,17 @@ test('青空文庫のルビをVOICEVOX用の読みに変換する', () => {
 
 test('タイトルカード用の表示文字からルビ記法だけを除く', () => {
   assert.equal(displayText('｜去年《きょねん》の木\n新美南吉'), '去年の木\n新美南吉');
+});
+
+test('日英字幕用の英訳を空行を除いて一行ずつ読み込む', () => {
+  const translation = ' Strong in the rain \r\n\r\n Strong in the wind ';
+  assert.deepEqual(translationLines(translation), [
+    'Strong in the rain',
+    'Strong in the wind'
+  ]);
+  assert.equal(translationAtCaption(translation, 1, 2), '');
+  assert.equal(translationAtCaption(translation, 2, 2), 'Strong in the rain');
+  assert.equal(translationAtCaption(translation, 3, 2), 'Strong in the wind');
 });
 
 test('英字は音声用の読みに変換し、字幕では元の表記を保つ', () => {
